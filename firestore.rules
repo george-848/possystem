@@ -1,0 +1,1248 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Helpers
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isVerifiedOrProvisionedUser() {
+      return isEmailVerified() || (isSignedIn() && exists(userPath(request.auth.uid)));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 2 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidCompositeId(id) {
+      return id is string && id.size() >= 3 && id.size() <= 260 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isBootstrapAdmin() {
+      return isEmailVerified() && request.auth.token.email == 'appiahkubi848@gmail.com';
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function rolePath(roleId) {
+      return /databases/$(database)/documents/roles/$(roleId);
+    }
+
+    function orgPath(orgId) {
+      return /databases/$(database)/documents/organizations/$(orgId);
+    }
+
+    function branchPath(branchId) {
+      return /databases/$(database)/documents/branches/$(branchId);
+    }
+
+    function hasUserProfile() {
+      return isVerifiedOrProvisionedUser() && exists(userPath(request.auth.uid));
+    }
+
+    function currentUser() {
+      return get(userPath(request.auth.uid)).data;
+    }
+
+    function isActiveUser() {
+      return isSignedIn() &&
+        exists(userPath(request.auth.uid)) &&
+        get(userPath(request.auth.uid)).data.accountStatus == 'active';
+    }
+
+    function isOrgMember(orgId) {
+      return isSignedIn() &&
+        exists(userPath(request.auth.uid)) &&
+        checkOrgMemberDoc(get(userPath(request.auth.uid)).data, orgId);
+    }
+
+    function checkOrgMemberDoc(user, orgId) {
+      return user.accountStatus == 'active' && user.organizationId == orgId;
+    }
+
+    function checkSuperAdminWithUser(user, orgId) {
+      let role = get(rolePath(user.roleId)).data;
+      return checkOrgMemberDoc(user, orgId) &&
+        role.isActive == true &&
+        role.scope == 'organization';
+    }
+
+    function isSuperAdmin(orgId) {
+      return isBootstrapAdmin() || (
+        isSignedIn() &&
+        exists(userPath(request.auth.uid)) &&
+        checkSuperAdminDoc(get(userPath(request.auth.uid)).data, orgId)
+      );
+    }
+
+    function checkSuperAdminDoc(user, orgId) {
+      return exists(rolePath(user.roleId)) &&
+        checkSuperAdminWithUser(user, orgId);
+    }
+
+    function checkBranchAccessDoc(user, orgId, branchId) {
+      return checkOrgMemberDoc(user, orgId) && (
+        (branchId in user.branchIds) ||
+        checkSuperAdminDoc(user, orgId)
+      );
+    }
+
+    function hasBranchAccess(orgId, branchId) {
+      return isBootstrapAdmin() || (
+        isSignedIn() &&
+        exists(userPath(request.auth.uid)) &&
+        checkBranchAccessDoc(get(userPath(request.auth.uid)).data, orgId, branchId)
+      );
+    }
+
+    function checkPermWithRole(user, perm) {
+      let role = get(rolePath(user.roleId)).data;
+      return role.isActive == true && (
+        role.scope == 'organization' ||
+        (
+          (!('deniedPermissions' in user) || !(perm in user.deniedPermissions)) &&
+          (perm in role.permissions)
+        )
+      );
+    }
+
+    function checkPermissionDoc(user, orgId, perm) {
+      return checkOrgMemberDoc(user, orgId) && (
+        (
+          (!('deniedPermissions' in user) || !(perm in user.deniedPermissions)) &&
+          ('grantedPermissions' in user && perm in user.grantedPermissions)
+        ) || (
+          exists(rolePath(user.roleId)) &&
+          checkPermWithRole(user, perm)
+        )
+      );
+    }
+
+    function hasPermission(orgId, perm) {
+      return isBootstrapAdmin() || (
+        isSignedIn() &&
+        exists(userPath(request.auth.uid)) &&
+        checkPermissionDoc(get(userPath(request.auth.uid)).data, orgId, perm)
+      );
+    }
+
+    function checkBranchPermWithRole(user, branchId, perm) {
+      let role = get(rolePath(user.roleId)).data;
+      return role.isActive == true && (
+        role.scope == 'organization' || (
+          (branchId in user.branchIds) &&
+          (!('deniedPermissions' in user) || !(perm in user.deniedPermissions)) &&
+          (
+            ('grantedPermissions' in user && perm in user.grantedPermissions) ||
+            (perm in role.permissions)
+          )
+        )
+      );
+    }
+
+    function checkBranchPermissionDoc(user, orgId, branchId, perm) {
+      return checkOrgMemberDoc(user, orgId) && (
+        (
+          (branchId in user.branchIds) &&
+          (!('deniedPermissions' in user) || !(perm in user.deniedPermissions)) &&
+          ('grantedPermissions' in user && perm in user.grantedPermissions)
+        ) || (
+          exists(rolePath(user.roleId)) &&
+          checkBranchPermWithRole(user, branchId, perm)
+        )
+      );
+    }
+
+    function hasBranchPermission(orgId, branchId, perm) {
+      return isBootstrapAdmin() || (
+        isSignedIn() &&
+        exists(userPath(request.auth.uid)) &&
+        checkBranchPermissionDoc(get(userPath(request.auth.uid)).data, orgId, branchId, perm)
+      );
+    }
+
+    function checkBranchAnyPermWithRole(user, branchId, perms) {
+      let role = get(rolePath(user.roleId)).data;
+      return role.isActive == true && (
+        role.scope == 'organization' || (
+          (branchId in user.branchIds) && (
+            (
+              'grantedPermissions' in user && (
+                (!('deniedPermissions' in user) && user.grantedPermissions.hasAny(perms)) ||
+                ('deniedPermissions' in user && user.grantedPermissions.removeAll(user.deniedPermissions).hasAny(perms))
+              )
+            ) || (
+              (!('deniedPermissions' in user) && role.permissions.hasAny(perms)) ||
+              ('deniedPermissions' in user && role.permissions.removeAll(user.deniedPermissions).hasAny(perms))
+            )
+          )
+        )
+      );
+    }
+
+    function checkBranchAnyPermissionDoc(user, orgId, branchId, perms) {
+      return checkOrgMemberDoc(user, orgId) && (
+        (
+          (branchId in user.branchIds) &&
+          'grantedPermissions' in user && (
+            (!('deniedPermissions' in user) && user.grantedPermissions.hasAny(perms)) ||
+            ('deniedPermissions' in user && user.grantedPermissions.removeAll(user.deniedPermissions).hasAny(perms))
+          )
+        ) || (
+          exists(rolePath(user.roleId)) &&
+          checkBranchAnyPermWithRole(user, branchId, perms)
+        )
+      );
+    }
+
+    function hasAnyBranchPermission(orgId, branchId, perms) {
+      return isBootstrapAdmin() || (
+        isSignedIn() &&
+        exists(userPath(request.auth.uid)) &&
+        checkBranchAnyPermissionDoc(get(userPath(request.auth.uid)).data, orgId, branchId, perms)
+      );
+    }
+
+    // 3. Entity Validation Blueprints (Anti-Update-Gap)
+
+    function isValidOrganization(data) {
+      return data.keys().hasAll(['organizationId', 'businessName', 'currency', 'currencySymbol', 'timezone', 'defaultTaxRateBps', 'allowNegativeInventory', 'status', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['organizationId', 'businessName', 'registrationNumber', 'logoUrl', 'email', 'phone', 'address', 'country', 'currency', 'currencySymbol', 'timezone', 'defaultTaxRateBps', 'taxLabel', 'allowNegativeInventory', 'status', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        isValidId(data.organizationId) &&
+        data.businessName is string && data.businessName.size() >= 2 && data.businessName.size() <= 160 &&
+        (!('registrationNumber' in data) || (data.registrationNumber is string && data.registrationNumber.size() <= 80)) &&
+        (!('logoUrl' in data) || (data.logoUrl is string && data.logoUrl.size() <= 1000)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 160)) &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
+        (!('country' in data) || (data.country is string && data.country.size() <= 80)) &&
+        data.currency is string && data.currency.size() >= 3 && data.currency.size() <= 8 &&
+        data.currencySymbol is string && data.currencySymbol.size() >= 1 && data.currencySymbol.size() <= 8 &&
+        data.timezone is string && data.timezone.size() >= 2 && data.timezone.size() <= 80 &&
+        data.defaultTaxRateBps is int && data.defaultTaxRateBps >= 0 && data.defaultTaxRateBps <= 5000 &&
+        (!('taxLabel' in data) || (data.taxLabel is string && data.taxLabel.size() <= 40)) &&
+        data.allowNegativeInventory is bool &&
+        data.status in ['active', 'suspended'] &&
+        isValidId(data.ownerUid);
+    }
+
+    function isValidBranch(data) {
+      return data.keys().hasAll(['branchId', 'organizationId', 'branchCode', 'branchName', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['branchId', 'organizationId', 'branchCode', 'branchName', 'address', 'city', 'region', 'country', 'contactNumber', 'email', 'managerName', 'operatingHours', 'status', 'createdAt', 'updatedAt']) &&
+        isValidId(data.branchId) &&
+        isValidId(data.organizationId) &&
+        data.branchCode is string && data.branchCode.size() >= 2 && data.branchCode.size() <= 32 &&
+        data.branchName is string && data.branchName.size() >= 2 && data.branchName.size() <= 160 &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
+        (!('city' in data) || (data.city is string && data.city.size() <= 100)) &&
+        (!('region' in data) || (data.region is string && data.region.size() <= 100)) &&
+        (!('country' in data) || (data.country is string && data.country.size() <= 80)) &&
+        (!('contactNumber' in data) || (data.contactNumber is string && data.contactNumber.size() <= 40)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 160)) &&
+        (!('managerName' in data) || (data.managerName is string && data.managerName.size() <= 120)) &&
+        (!('operatingHours' in data) || (data.operatingHours is string && data.operatingHours.size() <= 120)) &&
+        data.status in ['active', 'suspended'];
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'fullName', 'email', 'organizationId', 'branchIds', 'defaultBranchId', 'roleId', 'grantedPermissions', 'deniedPermissions', 'accountStatus', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'fullName', 'email', 'phone', 'organizationId', 'branchIds', 'defaultBranchId', 'roleId', 'grantedPermissions', 'deniedPermissions', 'accountStatus', 'lastLogin', 'invitationId', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 160 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
+        isValidId(data.organizationId) &&
+        data.branchIds is list && data.branchIds.size() <= 50 &&
+        (data.branchIds.size() == 0 || data.branchIds[0] is string) &&
+        data.defaultBranchId is string && data.defaultBranchId.size() <= 128 &&
+        isValidId(data.roleId) &&
+        data.grantedPermissions is list && data.grantedPermissions.size() <= 100 &&
+        (data.grantedPermissions.size() == 0 || data.grantedPermissions[0] is string) &&
+        data.deniedPermissions is list && data.deniedPermissions.size() <= 100 &&
+        (data.deniedPermissions.size() == 0 || data.deniedPermissions[0] is string) &&
+        data.accountStatus in ['active', 'suspended', 'invited'] &&
+        (!('invitationId' in data) || isValidId(data.invitationId));
+    }
+
+    function isValidRole(data) {
+      return data.keys().hasAll(['roleId', 'organizationId', 'name', 'scope', 'permissions', 'isSystem', 'isActive', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['roleId', 'organizationId', 'name', 'description', 'scope', 'permissions', 'isSystem', 'isActive', 'createdAt', 'updatedAt']) &&
+        isValidId(data.roleId) &&
+        isValidId(data.organizationId) &&
+        data.name is string && data.name.size() >= 2 && data.name.size() <= 100 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 300)) &&
+        data.scope in ['organization', 'branch'] &&
+        data.permissions is list && data.permissions.size() <= 100 &&
+        (data.permissions.size() == 0 || data.permissions[0] is string) &&
+        data.isSystem is bool &&
+        data.isActive is bool;
+    }
+
+    function isValidPermissionDef(data) {
+      return data.keys().hasAll(['permissionId', 'organizationId', 'module', 'action', 'label']) &&
+        data.keys().hasOnly(['permissionId', 'organizationId', 'module', 'action', 'label', 'description']) &&
+        data.permissionId is string && data.permissionId.size() >= 2 && data.permissionId.size() <= 80 &&
+        isValidId(data.organizationId) &&
+        data.module is string && data.module.size() >= 2 && data.module.size() <= 60 &&
+        data.action is string && data.action.size() >= 2 && data.action.size() <= 40 &&
+        data.label is string && data.label.size() >= 2 && data.label.size() <= 120 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 240));
+    }
+
+    function isValidInvitation(data) {
+      return data.keys().hasAll(['invitationId', 'organizationId', 'email', 'fullName', 'roleId', 'branchIds', 'defaultBranchId', 'status', 'invitedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['invitationId', 'organizationId', 'email', 'fullName', 'phone', 'roleId', 'branchIds', 'defaultBranchId', 'status', 'invitedBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.invitationId) &&
+        isValidId(data.organizationId) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 160 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
+        isValidId(data.roleId) &&
+        data.branchIds is list && data.branchIds.size() <= 50 &&
+        (data.branchIds.size() == 0 || data.branchIds[0] is string) &&
+        data.defaultBranchId is string && data.defaultBranchId.size() <= 128 &&
+        data.status in ['pending', 'accepted', 'revoked'] &&
+        isValidId(data.invitedBy);
+    }
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['categoryId', 'organizationId', 'name', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['categoryId', 'organizationId', 'name', 'description', 'status', 'createdAt', 'updatedAt']) &&
+        isValidId(data.categoryId) &&
+        isValidId(data.organizationId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 300)) &&
+        data.status in ['active', 'archived'];
+    }
+
+    function isValidProduct(data) {
+      return data.keys().hasAll(['productId', 'organizationId', 'name', 'sku', 'costPriceMinor', 'sellingPriceMinor', 'taxCategory', 'minimumStock', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['productId', 'organizationId', 'categoryId', 'name', 'sku', 'barcode', 'description', 'brand', 'unit', 'imageUrl', 'costPriceMinor', 'sellingPriceMinor', 'wholesalePriceMinor', 'taxCategory', 'minimumStock', 'availableBranchIds', 'status', 'createdAt', 'updatedAt']) &&
+        isValidId(data.productId) &&
+        isValidId(data.organizationId) &&
+        (!('categoryId' in data) || (data.categoryId is string && data.categoryId.size() <= 128)) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 180 &&
+        data.sku is string && data.sku.size() >= 1 && data.sku.size() <= 64 &&
+        (!('barcode' in data) || (data.barcode is string && data.barcode.size() <= 64)) &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 600)) &&
+        (!('brand' in data) || (data.brand is string && data.brand.size() <= 100)) &&
+        (!('unit' in data) || (data.unit is string && data.unit.size() <= 40)) &&
+        (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 1000)) &&
+        data.costPriceMinor is int && data.costPriceMinor >= 0 &&
+        data.sellingPriceMinor is int && data.sellingPriceMinor >= 0 &&
+        (!('wholesalePriceMinor' in data) || (data.wholesalePriceMinor is int && data.wholesalePriceMinor >= 0)) &&
+        data.taxCategory in ['standard', 'exempt', 'zero'] &&
+        data.minimumStock is int && data.minimumStock >= 0 &&
+        (!('availableBranchIds' in data) || (data.availableBranchIds is list && data.availableBranchIds.size() <= 100)) &&
+        data.status in ['active', 'archived'];
+    }
+
+    function isValidBranchInventory(data) {
+      return data.keys().hasAll(['inventoryId', 'organizationId', 'branchId', 'productId', 'quantityAvailable', 'reorderLevel', 'costPriceMinor', 'sellingPriceMinor', 'updatedAt']) &&
+        data.keys().hasOnly(['inventoryId', 'organizationId', 'branchId', 'productId', 'quantityAvailable', 'reorderLevel', 'costPriceMinor', 'sellingPriceMinor', 'updatedAt']) &&
+        isValidCompositeId(data.inventoryId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        isValidId(data.productId) &&
+        data.quantityAvailable is int &&
+        (data.quantityAvailable >= 0 || get(orgPath(data.organizationId)).data.allowNegativeInventory == true) &&
+        data.reorderLevel is int && data.reorderLevel >= 0 &&
+        data.costPriceMinor is int && data.costPriceMinor >= 0 &&
+        data.sellingPriceMinor is int && data.sellingPriceMinor >= 0;
+    }
+
+    function isValidStockMovement(data) {
+      return data.keys().hasAll(['movementId', 'organizationId', 'branchId', 'productId', 'movementType', 'quantity', 'previousQuantity', 'newQuantity', 'performedBy', 'createdAt']) &&
+        data.keys().hasOnly(['movementId', 'organizationId', 'branchId', 'productId', 'movementType', 'quantity', 'previousQuantity', 'newQuantity', 'referenceType', 'referenceId', 'reason', 'performedBy', 'createdAt']) &&
+        isValidId(data.movementId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        isValidId(data.productId) &&
+        data.movementType in ['sale', 'purchase_receipt', 'adjustment_add', 'adjustment_reduce', 'stock_count', 'damaged', 'expired', 'transfer_out', 'transfer_in', 'refund_restock', 'refund_damaged'] &&
+        data.quantity is int &&
+        data.previousQuantity is int &&
+        data.newQuantity is int &&
+        (!('referenceType' in data) || (data.referenceType is string && data.referenceType.size() <= 60)) &&
+        (!('referenceId' in data) || (data.referenceId is string && data.referenceId.size() <= 128)) &&
+        (!('reason' in data) || (data.reason is string && data.reason.size() <= 300)) &&
+        isValidId(data.performedBy);
+    }
+
+    function isValidSale(data) {
+      return data.keys().hasAll(['saleId', 'transactionNumber', 'idempotencyKey', 'organizationId', 'branchId', 'cashierId', 'itemCount', 'subtotalMinor', 'discountMinor', 'taxMinor', 'totalMinor', 'cogsMinor', 'paymentMethod', 'paymentStatus', 'saleStatus', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['saleId', 'transactionNumber', 'idempotencyKey', 'organizationId', 'branchId', 'cashierId', 'cashierName', 'cashSessionId', 'customerId', 'customerName', 'itemCount', 'subtotalMinor', 'discountMinor', 'taxMinor', 'totalMinor', 'cogsMinor', 'amountTenderedMinor', 'changeMinor', 'paymentMethod', 'paymentStatus', 'saleStatus', 'createdAt', 'updatedAt']) &&
+        isValidId(data.saleId) &&
+        data.transactionNumber is string && data.transactionNumber.size() >= 4 && data.transactionNumber.size() <= 64 &&
+        data.idempotencyKey is string && data.idempotencyKey.size() >= 4 && data.idempotencyKey.size() <= 128 &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        isValidId(data.cashierId) &&
+        (!('cashierName' in data) || (data.cashierName is string && data.cashierName.size() <= 160)) &&
+        (!('cashSessionId' in data) || (data.cashSessionId is string && data.cashSessionId.size() <= 128)) &&
+        (!('customerId' in data) || (data.customerId is string && data.customerId.size() <= 128)) &&
+        (!('customerName' in data) || (data.customerName is string && data.customerName.size() <= 160)) &&
+        data.itemCount is int && data.itemCount >= 1 &&
+        data.subtotalMinor is int && data.subtotalMinor >= 0 &&
+        data.discountMinor is int && data.discountMinor >= 0 &&
+        data.taxMinor is int && data.taxMinor >= 0 &&
+        data.totalMinor is int && data.totalMinor >= 0 &&
+        data.cogsMinor is int && data.cogsMinor >= 0 &&
+        (!('amountTenderedMinor' in data) || (data.amountTenderedMinor is int && data.amountTenderedMinor >= 0)) &&
+        (!('changeMinor' in data) || (data.changeMinor is int && data.changeMinor >= 0)) &&
+        data.paymentMethod in ['cash', 'mobile_money', 'card', 'bank_transfer', 'split'] &&
+        data.paymentStatus in ['paid', 'partial', 'refunded'] &&
+        data.saleStatus in ['completed', 'cancelled', 'refunded', 'partially_refunded'];
+    }
+
+    function isValidSaleItem(data) {
+      return data.keys().hasAll(['itemId', 'saleId', 'organizationId', 'branchId', 'productId', 'productName', 'quantity', 'returnedQuantity', 'unitPriceMinor', 'costPriceMinor', 'discountMinor', 'taxMinor', 'lineTotalMinor']) &&
+        data.keys().hasOnly(['itemId', 'saleId', 'organizationId', 'branchId', 'productId', 'productName', 'sku', 'quantity', 'returnedQuantity', 'unitPriceMinor', 'costPriceMinor', 'discountMinor', 'taxMinor', 'lineTotalMinor']) &&
+        isValidId(data.itemId) &&
+        isValidId(data.saleId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        isValidId(data.productId) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 180 &&
+        (!('sku' in data) || (data.sku is string && data.sku.size() <= 64)) &&
+        data.quantity is int && data.quantity >= 1 &&
+        data.returnedQuantity is int && data.returnedQuantity >= 0 && data.returnedQuantity <= data.quantity &&
+        data.unitPriceMinor is int && data.unitPriceMinor >= 0 &&
+        data.costPriceMinor is int && data.costPriceMinor >= 0 &&
+        data.discountMinor is int && data.discountMinor >= 0 &&
+        data.taxMinor is int && data.taxMinor >= 0 &&
+        data.lineTotalMinor is int && data.lineTotalMinor >= 0;
+    }
+
+    function isValidPayment(data) {
+      return data.keys().hasAll(['paymentId', 'organizationId', 'branchId', 'saleId', 'method', 'amountMinor', 'status', 'createdAt']) &&
+        data.keys().hasOnly(['paymentId', 'organizationId', 'branchId', 'saleId', 'method', 'amountMinor', 'reference', 'status', 'createdAt']) &&
+        isValidId(data.paymentId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        isValidId(data.saleId) &&
+        data.method in ['cash', 'mobile_money', 'card', 'bank_transfer'] &&
+        data.amountMinor is int && data.amountMinor >= 0 &&
+        (!('reference' in data) || (data.reference is string && data.reference.size() <= 120)) &&
+        data.status in ['settled', 'manual_unintegrated', 'refunded'];
+    }
+
+    function isValidCustomer(data) {
+      return data.keys().hasAll(['customerId', 'organizationId', 'branchId', 'fullName', 'totalPurchasesMinor', 'transactionCount', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['customerId', 'organizationId', 'branchId', 'fullName', 'phone', 'email', 'address', 'totalPurchasesMinor', 'transactionCount', 'createdAt', 'updatedAt']) &&
+        isValidId(data.customerId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 160 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 160)) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
+        data.totalPurchasesMinor is int && data.totalPurchasesMinor >= 0 &&
+        data.transactionCount is int && data.transactionCount >= 0;
+    }
+
+    function isValidSupplier(data) {
+      return data.keys().hasAll(['supplierId', 'organizationId', 'name', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['supplierId', 'organizationId', 'name', 'contactPerson', 'phone', 'email', 'address', 'taxId', 'status', 'createdAt', 'updatedAt']) &&
+        isValidId(data.supplierId) &&
+        isValidId(data.organizationId) &&
+        data.name is string && data.name.size() >= 2 && data.name.size() <= 160 &&
+        (!('contactPerson' in data) || (data.contactPerson is string && data.contactPerson.size() <= 120)) &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 160)) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
+        (!('taxId' in data) || (data.taxId is string && data.taxId.size() <= 64)) &&
+        data.status in ['active', 'inactive'];
+    }
+
+    function isValidPurchase(data) {
+      return data.keys().hasAll(['purchaseId', 'purchaseNumber', 'organizationId', 'branchId', 'supplierId', 'subtotalMinor', 'discountMinor', 'taxMinor', 'totalMinor', 'paidMinor', 'status', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['purchaseId', 'purchaseNumber', 'organizationId', 'branchId', 'supplierId', 'supplierName', 'invoiceNumber', 'subtotalMinor', 'discountMinor', 'taxMinor', 'totalMinor', 'paidMinor', 'status', 'createdBy', 'approvedBy', 'receivedBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.purchaseId) &&
+        data.purchaseNumber is string && data.purchaseNumber.size() >= 3 && data.purchaseNumber.size() <= 64 &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        isValidId(data.supplierId) &&
+        (!('supplierName' in data) || (data.supplierName is string && data.supplierName.size() <= 160)) &&
+        (!('invoiceNumber' in data) || (data.invoiceNumber is string && data.invoiceNumber.size() <= 80)) &&
+        data.subtotalMinor is int && data.subtotalMinor >= 0 &&
+        data.discountMinor is int && data.discountMinor >= 0 &&
+        data.taxMinor is int && data.taxMinor >= 0 &&
+        data.totalMinor is int && data.totalMinor >= 0 &&
+        data.paidMinor is int && data.paidMinor >= 0 &&
+        data.status in ['draft', 'pending_approval', 'approved', 'received', 'rejected'] &&
+        isValidId(data.createdBy) &&
+        (!('approvedBy' in data) || isValidId(data.approvedBy)) &&
+        (!('receivedBy' in data) || isValidId(data.receivedBy));
+    }
+
+    function isValidPurchaseItem(data) {
+      return data.keys().hasAll(['itemId', 'purchaseId', 'organizationId', 'branchId', 'productId', 'productName', 'quantity', 'unitCostMinor', 'discountMinor', 'taxMinor', 'lineTotalMinor']) &&
+        data.keys().hasOnly(['itemId', 'purchaseId', 'organizationId', 'branchId', 'productId', 'productName', 'quantity', 'unitCostMinor', 'discountMinor', 'taxMinor', 'lineTotalMinor']) &&
+        isValidId(data.itemId) &&
+        isValidId(data.purchaseId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        isValidId(data.productId) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 180 &&
+        data.quantity is int && data.quantity >= 1 &&
+        data.unitCostMinor is int && data.unitCostMinor >= 0 &&
+        data.discountMinor is int && data.discountMinor >= 0 &&
+        data.taxMinor is int && data.taxMinor >= 0 &&
+        data.lineTotalMinor is int && data.lineTotalMinor >= 0;
+    }
+
+    function isValidStockTransfer(data) {
+      return data.keys().hasAll(['transferId', 'transferNumber', 'organizationId', 'sourceBranchId', 'destinationBranchId', 'status', 'requestedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transferId', 'transferNumber', 'organizationId', 'sourceBranchId', 'destinationBranchId', 'status', 'notes', 'requestedBy', 'approvedBy', 'dispatchedBy', 'receivedBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.transferId) &&
+        data.transferNumber is string && data.transferNumber.size() >= 3 && data.transferNumber.size() <= 64 &&
+        isValidId(data.organizationId) &&
+        isValidId(data.sourceBranchId) &&
+        isValidId(data.destinationBranchId) &&
+        data.sourceBranchId != data.destinationBranchId &&
+        data.status in ['draft', 'pending_approval', 'approved', 'dispatched', 'partially_received', 'received', 'rejected', 'cancelled'] &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 400)) &&
+        isValidId(data.requestedBy) &&
+        (!('approvedBy' in data) || isValidId(data.approvedBy)) &&
+        (!('dispatchedBy' in data) || isValidId(data.dispatchedBy)) &&
+        (!('receivedBy' in data) || isValidId(data.receivedBy));
+    }
+
+    function isValidTransferItem(data) {
+      return data.keys().hasAll(['itemId', 'transferId', 'organizationId', 'productId', 'productName', 'requestedQuantity', 'receivedQuantity', 'damagedQuantity']) &&
+        data.keys().hasOnly(['itemId', 'transferId', 'organizationId', 'productId', 'productName', 'requestedQuantity', 'receivedQuantity', 'damagedQuantity']) &&
+        isValidId(data.itemId) &&
+        isValidId(data.transferId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.productId) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 180 &&
+        data.requestedQuantity is int && data.requestedQuantity >= 1 &&
+        data.receivedQuantity is int && data.receivedQuantity >= 0 &&
+        data.damagedQuantity is int && data.damagedQuantity >= 0;
+    }
+
+    function isValidRefund(data) {
+      return data.keys().hasAll(['refundId', 'refundNumber', 'organizationId', 'branchId', 'saleId', 'reason', 'refundTotalMinor', 'refundMethod', 'status', 'requestedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['refundId', 'refundNumber', 'organizationId', 'branchId', 'saleId', 'transactionNumber', 'reason', 'refundTotalMinor', 'refundMethod', 'status', 'requestedBy', 'approvedBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.refundId) &&
+        data.refundNumber is string && data.refundNumber.size() >= 3 && data.refundNumber.size() <= 64 &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        isValidId(data.saleId) &&
+        (!('transactionNumber' in data) || (data.transactionNumber is string && data.transactionNumber.size() <= 64)) &&
+        data.reason is string && data.reason.size() >= 2 && data.reason.size() <= 300 &&
+        data.refundTotalMinor is int && data.refundTotalMinor >= 0 &&
+        data.refundMethod in ['cash', 'mobile_money', 'card', 'bank_transfer'] &&
+        data.status in ['pending', 'approved', 'processed', 'rejected'] &&
+        isValidId(data.requestedBy) &&
+        (!('approvedBy' in data) || isValidId(data.approvedBy));
+    }
+
+    function isValidRefundItem(data) {
+      return data.keys().hasAll(['itemId', 'refundId', 'organizationId', 'branchId', 'saleItemId', 'productId', 'productName', 'quantity', 'condition', 'refundAmountMinor']) &&
+        data.keys().hasOnly(['itemId', 'refundId', 'organizationId', 'branchId', 'saleItemId', 'productId', 'productName', 'quantity', 'condition', 'refundAmountMinor']) &&
+        isValidId(data.itemId) &&
+        isValidId(data.refundId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        isValidId(data.saleItemId) &&
+        isValidId(data.productId) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 180 &&
+        data.quantity is int && data.quantity >= 1 &&
+        data.condition in ['restock', 'damaged'] &&
+        data.refundAmountMinor is int && data.refundAmountMinor >= 0;
+    }
+
+    function isValidCashSession(data) {
+      return data.keys().hasAll(['sessionId', 'organizationId', 'branchId', 'cashierId', 'openingBalanceMinor', 'cashSalesMinor', 'cashRefundsMinor', 'cashDepositsMinor', 'cashWithdrawalsMinor', 'expectedClosingBalanceMinor', 'status', 'openedAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sessionId', 'organizationId', 'branchId', 'cashierId', 'cashierName', 'openingBalanceMinor', 'cashSalesMinor', 'cashRefundsMinor', 'cashDepositsMinor', 'cashWithdrawalsMinor', 'expectedClosingBalanceMinor', 'actualClosingBalanceMinor', 'differenceMinor', 'status', 'approvedBy', 'openedAt', 'closedAt', 'updatedAt']) &&
+        isValidId(data.sessionId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        isValidId(data.cashierId) &&
+        (!('cashierName' in data) || (data.cashierName is string && data.cashierName.size() <= 160)) &&
+        data.openingBalanceMinor is int && data.openingBalanceMinor >= 0 &&
+        data.cashSalesMinor is int && data.cashSalesMinor >= 0 &&
+        data.cashRefundsMinor is int && data.cashRefundsMinor >= 0 &&
+        data.cashDepositsMinor is int && data.cashDepositsMinor >= 0 &&
+        data.cashWithdrawalsMinor is int && data.cashWithdrawalsMinor >= 0 &&
+        data.expectedClosingBalanceMinor is int &&
+        (!('actualClosingBalanceMinor' in data) || (data.actualClosingBalanceMinor is int && data.actualClosingBalanceMinor >= 0)) &&
+        (!('differenceMinor' in data) || data.differenceMinor is int) &&
+        data.status in ['open', 'closed', 'approved'] &&
+        (!('approvedBy' in data) || isValidId(data.approvedBy));
+    }
+
+    function isValidCashSessionTx(data) {
+      return data.keys().hasAll(['transactionId', 'sessionId', 'organizationId', 'branchId', 'type', 'amountMinor', 'performedBy', 'createdAt']) &&
+        data.keys().hasOnly(['transactionId', 'sessionId', 'organizationId', 'branchId', 'type', 'amountMinor', 'notes', 'referenceId', 'performedBy', 'createdAt']) &&
+        isValidId(data.transactionId) &&
+        isValidId(data.sessionId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        data.type in ['sale', 'refund', 'deposit', 'withdrawal'] &&
+        data.amountMinor is int && data.amountMinor >= 0 &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 300)) &&
+        (!('referenceId' in data) || (data.referenceId is string && data.referenceId.size() <= 128)) &&
+        isValidId(data.performedBy);
+    }
+
+    function isValidExpense(data) {
+      return data.keys().hasAll(['expenseId', 'organizationId', 'branchId', 'category', 'description', 'amountMinor', 'expenseDate', 'submittedBy', 'approvalStatus', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['expenseId', 'organizationId', 'branchId', 'category', 'description', 'amountMinor', 'expenseDate', 'attachmentNote', 'submittedBy', 'approvalStatus', 'approvedBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.expenseId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        data.category is string && data.category.size() >= 2 && data.category.size() <= 80 &&
+        data.description is string && data.description.size() >= 2 && data.description.size() <= 300 &&
+        data.amountMinor is int && data.amountMinor >= 0 &&
+        data.expenseDate is string && data.expenseDate.size() >= 4 && data.expenseDate.size() <= 32 &&
+        (!('attachmentNote' in data) || (data.attachmentNote is string && data.attachmentNote.size() <= 300)) &&
+        isValidId(data.submittedBy) &&
+        data.approvalStatus in ['pending', 'approved', 'rejected'] &&
+        (!('approvedBy' in data) || isValidId(data.approvedBy));
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['logId', 'userId', 'organizationId', 'action', 'resourceType', 'resourceId', 'createdAt']) &&
+        data.keys().hasOnly(['logId', 'userId', 'userEmail', 'organizationId', 'branchId', 'action', 'resourceType', 'resourceId', 'requestId', 'details', 'createdAt']) &&
+        isValidId(data.logId) &&
+        isValidId(data.userId) &&
+        (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 160)) &&
+        isValidId(data.organizationId) &&
+        (!('branchId' in data) || (data.branchId is string && data.branchId.size() <= 128)) &&
+        data.action is string && data.action.size() >= 2 && data.action.size() <= 80 &&
+        data.resourceType is string && data.resourceType.size() >= 2 && data.resourceType.size() <= 80 &&
+        data.resourceId is string && data.resourceId.size() >= 1 && data.resourceId.size() <= 128 &&
+        (!('requestId' in data) || (data.requestId is string && data.requestId.size() <= 128)) &&
+        (!('details' in data) || (data.details is string && data.details.size() <= 1000));
+    }
+
+    function isValidBranchDailySummary(data) {
+      return data.keys().hasAll(['summaryId', 'organizationId', 'branchId', 'dateKey', 'salesCount', 'revenueMinor', 'cogsMinor', 'discountsMinor', 'refundsMinor', 'expensesMinor', 'updatedAt']) &&
+        data.keys().hasOnly(['summaryId', 'organizationId', 'branchId', 'dateKey', 'salesCount', 'revenueMinor', 'cogsMinor', 'discountsMinor', 'refundsMinor', 'expensesMinor', 'updatedAt']) &&
+        isValidCompositeId(data.summaryId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        data.dateKey is string && data.dateKey.size() >= 8 && data.dateKey.size() <= 16 &&
+        data.salesCount is int && data.salesCount >= 0 &&
+        data.revenueMinor is int && data.revenueMinor >= 0 &&
+        data.cogsMinor is int && data.cogsMinor >= 0 &&
+        data.discountsMinor is int && data.discountsMinor >= 0 &&
+        data.refundsMinor is int && data.refundsMinor >= 0 &&
+        data.expensesMinor is int && data.expensesMinor >= 0;
+    }
+
+    function isValidSystemSettings(data) {
+      return data.keys().hasAll(['settingId', 'organizationId', 'receiptHeader', 'receiptFooter', 'supportedPaymentMethods', 'maxCashierDiscountPct', 'expenseApprovalLimitMinor', 'refundWindowDays', 'lowStockNotificationsEnabled', 'updatedAt']) &&
+        data.keys().hasOnly(['settingId', 'organizationId', 'receiptHeader', 'receiptFooter', 'returnPolicy', 'receiptVisibleFields', 'supportedPaymentMethods', 'maxCashierDiscountPct', 'expenseApprovalLimitMinor', 'refundWindowDays', 'lowStockNotificationsEnabled', 'updatedAt']) &&
+        isValidId(data.settingId) &&
+        isValidId(data.organizationId) &&
+        data.receiptHeader is string && data.receiptHeader.size() <= 300 &&
+        data.receiptFooter is string && data.receiptFooter.size() <= 300 &&
+        (!('returnPolicy' in data) || (data.returnPolicy is string && data.returnPolicy.size() <= 400)) &&
+        (!('receiptVisibleFields' in data) || (
+          data.receiptVisibleFields is list &&
+          data.receiptVisibleFields.size() <= 20 &&
+          data.receiptVisibleFields.hasOnly(['logo', 'branchInfo', 'receiptHeader', 'date', 'cashier', 'customer', 'itemSku', 'itemBreakdown', 'discount', 'tax', 'paymentMethod', 'returnPolicy', 'receiptFooter'])
+        )) &&
+        data.supportedPaymentMethods is list && data.supportedPaymentMethods.size() <= 10 &&
+        (data.supportedPaymentMethods.size() == 0 || data.supportedPaymentMethods[0] is string) &&
+        data.maxCashierDiscountPct is int && data.maxCashierDiscountPct >= 0 && data.maxCashierDiscountPct <= 100 &&
+        data.expenseApprovalLimitMinor is int && data.expenseApprovalLimitMinor >= 0 &&
+        data.refundWindowDays is int && data.refundWindowDays >= 0 && data.refundWindowDays <= 365 &&
+        data.lowStockNotificationsEnabled is bool;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['notificationId', 'organizationId', 'type', 'title', 'message', 'readBy', 'createdAt']) &&
+        data.keys().hasOnly(['notificationId', 'organizationId', 'branchId', 'type', 'title', 'message', 'readBy', 'createdAt']) &&
+        isValidId(data.notificationId) &&
+        isValidId(data.organizationId) &&
+        (!('branchId' in data) || (data.branchId is string && data.branchId.size() <= 128)) &&
+        data.type in ['low_stock', 'pending_approval', 'stock_transfer', 'purchase_completed', 'refund_request', 'cash_discrepancy', 'invitation', 'system_alert'] &&
+        data.title is string && data.title.size() >= 2 && data.title.size() <= 140 &&
+        data.message is string && data.message.size() >= 2 && data.message.size() <= 400 &&
+        data.readBy is list && data.readBy.size() <= 200;
+    }
+
+    function isValidIdempotencyKey(data) {
+      return data.keys().hasAll(['keyId', 'organizationId', 'branchId', 'resourceType', 'resourceId', 'createdAt']) &&
+        data.keys().hasOnly(['keyId', 'organizationId', 'branchId', 'resourceType', 'resourceId', 'createdAt']) &&
+        isValidId(data.keyId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        data.resourceType is string && data.resourceType.size() >= 2 && data.resourceType.size() <= 64 &&
+        isValidId(data.resourceId);
+    }
+
+    // 4. Collection Rules
+
+    match /organizations/{organizationId} {
+      allow get: if isValidId(organizationId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || isOrgMember(organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(organizationId) && isBootstrapAdmin() && isValidOrganization(incoming()) &&
+        incoming().organizationId == organizationId &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(organizationId) && isVerifiedOrProvisionedUser() && isValidOrganization(incoming()) &&
+        (isBootstrapAdmin() || hasPermission(organizationId, 'settings.manage')) &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['businessName', 'registrationNumber', 'logoUrl', 'email', 'phone', 'address', 'country', 'currency', 'currencySymbol', 'timezone', 'defaultTaxRateBps', 'taxLabel', 'allowNegativeInventory', 'status', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /branches/{branchId} {
+      allow get: if isValidId(branchId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || hasBranchAccess(existing().organizationId, branchId) || hasPermission(existing().organizationId, 'branches.view'));
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(branchId) && isVerifiedOrProvisionedUser() && isValidBranch(incoming()) &&
+        exists(orgPath(incoming().organizationId)) &&
+        hasPermission(incoming().organizationId, 'branches.create') &&
+        incoming().branchId == branchId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(branchId) && isVerifiedOrProvisionedUser() && isValidBranch(incoming()) &&
+        (hasPermission(existing().organizationId, 'branches.edit') || hasPermission(existing().organizationId, 'branches.manage')) &&
+        incoming().branchId == existing().branchId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['branchCode', 'branchName', 'address', 'city', 'region', 'country', 'contactNumber', 'email', 'managerName', 'operatingHours', 'status', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isVerifiedOrProvisionedUser() && (
+        request.auth.uid == userId ||
+        isBootstrapAdmin() ||
+        hasPermission(existing().organizationId, 'users.view')
+      );
+      allow list: if isVerifiedOrProvisionedUser() && (
+        existing().uid == request.auth.uid ||
+        isBootstrapAdmin() ||
+        (hasUserProfile() && existing().organizationId == currentUser().organizationId && hasPermission(existing().organizationId, 'users.view'))
+      );
+      allow create: if isValidId(userId) && isVerifiedOrProvisionedUser() && isValidUser(incoming()) &&
+        incoming().uid == userId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          (isBootstrapAdmin() && incoming().uid == request.auth.uid) ||
+          hasPermission(incoming().organizationId, 'users.create') ||
+          (
+            isEmailVerified() &&
+            incoming().uid == request.auth.uid &&
+            'invitationId' in incoming() &&
+            exists(/databases/$(database)/documents/invitations/$(incoming().invitationId)) &&
+            get(/databases/$(database)/documents/invitations/$(incoming().invitationId)).data.status == 'pending' &&
+            get(/databases/$(database)/documents/invitations/$(incoming().invitationId)).data.email.lower() == request.auth.token.email.lower() &&
+            incoming().organizationId == get(/databases/$(database)/documents/invitations/$(incoming().invitationId)).data.organizationId &&
+            incoming().roleId == get(/databases/$(database)/documents/invitations/$(incoming().invitationId)).data.roleId &&
+            incoming().branchIds == get(/databases/$(database)/documents/invitations/$(incoming().invitationId)).data.branchIds &&
+            incoming().defaultBranchId == get(/databases/$(database)/documents/invitations/$(incoming().invitationId)).data.defaultBranchId &&
+            incoming().grantedPermissions.size() == 0 &&
+            incoming().deniedPermissions.size() == 0 &&
+            incoming().accountStatus == 'active'
+          )
+        );
+      allow update: if isValidId(userId) && isVerifiedOrProvisionedUser() && isValidUser(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          (
+            request.auth.uid == userId &&
+            existing().accountStatus == 'active' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['lastLogin', 'updatedAt'])
+          ) ||
+          (
+            (hasPermission(existing().organizationId, 'users.edit') || hasPermission(existing().organizationId, 'users.manage') || hasPermission(existing().organizationId, 'users.suspend')) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'phone', 'branchIds', 'defaultBranchId', 'roleId', 'grantedPermissions', 'deniedPermissions', 'accountStatus', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /roles/{roleId} {
+      allow get: if isValidId(roleId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || isOrgMember(existing().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(roleId) && isVerifiedOrProvisionedUser() && isValidRole(incoming()) &&
+        hasPermission(incoming().organizationId, 'roles.create') &&
+        incoming().roleId == roleId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(roleId) && isVerifiedOrProvisionedUser() && isValidRole(incoming()) &&
+        (hasPermission(existing().organizationId, 'roles.edit') || hasPermission(existing().organizationId, 'roles.manage')) &&
+        incoming().roleId == existing().roleId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'scope', 'permissions', 'isActive', 'updatedAt']);
+      allow delete: if isValidId(roleId) && isVerifiedOrProvisionedUser() &&
+        hasPermission(existing().organizationId, 'roles.delete') &&
+        existing().isSystem == false;
+    }
+
+    match /permissions/{permissionId} {
+      allow get: if isValidId(permissionId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || isOrgMember(existing().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create, update: if isValidId(permissionId) && isVerifiedOrProvisionedUser() && isValidPermissionDef(incoming()) &&
+        hasPermission(incoming().organizationId, 'roles.manage');
+      allow delete: if false;
+    }
+
+    match /invitations/{invitationId} {
+      allow get: if isValidId(invitationId) && (
+        (isEmailVerified() && existing().email.lower() == request.auth.token.email.lower()) ||
+        (isVerifiedOrProvisionedUser() && hasPermission(existing().organizationId, 'users.view'))
+      );
+      allow list: if (
+        (isEmailVerified() && (
+          existing().email == request.auth.token.email.lower() ||
+          existing().email == request.auth.token.email
+        )) ||
+        isBootstrapAdmin() ||
+        (hasUserProfile() && existing().organizationId == currentUser().organizationId && hasPermission(existing().organizationId, 'users.view'))
+      );
+      allow create: if isValidId(invitationId) && isVerifiedOrProvisionedUser() && isValidInvitation(incoming()) &&
+        hasPermission(incoming().organizationId, 'users.create') &&
+        incoming().invitationId == invitationId &&
+        incoming().invitedBy == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(invitationId) && isValidInvitation(incoming()) &&
+        incoming().invitationId == existing().invitationId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().email == existing().email &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          (
+            isEmailVerified() &&
+            existing().status == 'pending' &&
+            existing().email.lower() == request.auth.token.email.lower() &&
+            incoming().status == 'accepted' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          ) ||
+          (
+            isVerifiedOrProvisionedUser() &&
+            hasPermission(existing().organizationId, 'users.manage') &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'roleId', 'branchIds', 'defaultBranchId', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /categories/{categoryId} {
+      allow get: if isValidId(categoryId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(categoryId) && isVerifiedOrProvisionedUser() && isValidCategory(incoming()) &&
+        hasPermission(incoming().organizationId, 'products.create') &&
+        incoming().categoryId == categoryId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(categoryId) && isVerifiedOrProvisionedUser() && isValidCategory(incoming()) &&
+        hasPermission(existing().organizationId, 'products.edit') &&
+        incoming().categoryId == existing().categoryId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'status', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /products/{productId} {
+      allow get: if isValidId(productId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(productId) && isVerifiedOrProvisionedUser() && isValidProduct(incoming()) &&
+        hasPermission(incoming().organizationId, 'products.create') &&
+        incoming().productId == productId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(productId) && isVerifiedOrProvisionedUser() && isValidProduct(incoming()) &&
+        (hasPermission(existing().organizationId, 'products.edit') || hasPermission(existing().organizationId, 'products.delete')) &&
+        incoming().productId == existing().productId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['categoryId', 'name', 'sku', 'barcode', 'description', 'brand', 'unit', 'imageUrl', 'costPriceMinor', 'sellingPriceMinor', 'wholesalePriceMinor', 'taxCategory', 'minimumStock', 'availableBranchIds', 'status', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /branchInventory/{inventoryId} {
+      allow get: if isValidCompositeId(inventoryId) && isVerifiedOrProvisionedUser() && (resource == null || hasBranchAccess(existing().organizationId, existing().branchId));
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidCompositeId(inventoryId) && isVerifiedOrProvisionedUser() && isValidBranchInventory(incoming()) &&
+        exists(branchPath(incoming().branchId)) &&
+        hasAnyBranchPermission(incoming().organizationId, incoming().branchId, ['inventory.adjust', 'purchases.approve', 'inventory.transfer']) &&
+        incoming().inventoryId == inventoryId &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidCompositeId(inventoryId) && isVerifiedOrProvisionedUser() && isValidBranchInventory(incoming()) &&
+        incoming().inventoryId == existing().inventoryId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().branchId == existing().branchId &&
+        incoming().productId == existing().productId &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['quantityAvailable', 'reorderLevel', 'costPriceMinor', 'sellingPriceMinor', 'updatedAt']) &&
+        hasAnyBranchPermission(existing().organizationId, existing().branchId, ['inventory.adjust', 'sales.create', 'sales.approve', 'purchases.approve', 'inventory.transfer']);
+      allow delete: if false;
+    }
+
+    match /stockMovements/{movementId} {
+      allow get: if isValidId(movementId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(movementId) && isVerifiedOrProvisionedUser() && isValidStockMovement(incoming()) &&
+        hasBranchAccess(incoming().organizationId, incoming().branchId) &&
+        incoming().movementId == movementId &&
+        incoming().performedBy == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /sales/{saleId} {
+      allow get: if isValidId(saleId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(saleId) && isVerifiedOrProvisionedUser() && isValidSale(incoming()) &&
+        hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.create') &&
+        incoming().saleId == saleId &&
+        incoming().cashierId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(saleId) && isVerifiedOrProvisionedUser() && isValidSale(incoming()) &&
+        hasBranchPermission(existing().organizationId, existing().branchId, 'sales.approve') &&
+        incoming().saleId == existing().saleId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().branchId == existing().branchId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['paymentStatus', 'saleStatus', 'updatedAt']);
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow get: if isValidId(saleId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
+        allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+        allow create: if isValidId(saleId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidSaleItem(incoming()) &&
+          hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.create') &&
+          incoming().saleId == saleId &&
+          incoming().itemId == itemId;
+        allow update: if isValidId(saleId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidSaleItem(incoming()) &&
+          hasBranchPermission(existing().organizationId, existing().branchId, 'sales.approve') &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['returnedQuantity']);
+        allow delete: if false;
+      }
+    }
+
+    match /payments/{paymentId} {
+      allow get: if isValidId(paymentId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(paymentId) && isVerifiedOrProvisionedUser() && isValidPayment(incoming()) &&
+        hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.create') &&
+        incoming().paymentId == paymentId &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(paymentId) && isVerifiedOrProvisionedUser() && isValidPayment(incoming()) &&
+        hasBranchPermission(existing().organizationId, existing().branchId, 'sales.approve') &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status']);
+      allow delete: if false;
+    }
+
+    match /customers/{customerId} {
+      allow get: if isValidId(customerId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(customerId) && isVerifiedOrProvisionedUser() && isValidCustomer(incoming()) &&
+        hasBranchPermission(incoming().organizationId, incoming().branchId, 'customers.create') &&
+        incoming().customerId == customerId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(customerId) && isVerifiedOrProvisionedUser() && isValidCustomer(incoming()) &&
+        incoming().customerId == existing().customerId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          (hasPermission(existing().organizationId, 'customers.edit') &&
+           incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'phone', 'email', 'address', 'updatedAt'])) ||
+          (hasBranchPermission(existing().organizationId, existing().branchId, 'sales.create') &&
+           incoming().diff(existing()).affectedKeys().hasOnly(['totalPurchasesMinor', 'transactionCount', 'updatedAt']))
+        );
+      allow delete: if false;
+    }
+
+    match /suppliers/{supplierId} {
+      allow get: if isValidId(supplierId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(supplierId) && isVerifiedOrProvisionedUser() && isValidSupplier(incoming()) &&
+        hasPermission(incoming().organizationId, 'suppliers.manage') &&
+        incoming().supplierId == supplierId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(supplierId) && isVerifiedOrProvisionedUser() && isValidSupplier(incoming()) &&
+        hasPermission(existing().organizationId, 'suppliers.manage') &&
+        incoming().supplierId == existing().supplierId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'contactPerson', 'phone', 'email', 'address', 'taxId', 'status', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /purchases/{purchaseId} {
+      allow get: if isValidId(purchaseId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(purchaseId) && isVerifiedOrProvisionedUser() && isValidPurchase(incoming()) &&
+        hasBranchPermission(incoming().organizationId, incoming().branchId, 'purchases.create') &&
+        incoming().purchaseId == purchaseId &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(purchaseId) && isVerifiedOrProvisionedUser() && isValidPurchase(incoming()) &&
+        incoming().purchaseId == existing().purchaseId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().branchId == existing().branchId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        existing().status != 'received' &&
+        existing().status != 'rejected' &&
+        (
+          (hasBranchPermission(existing().organizationId, existing().branchId, 'purchases.approve') &&
+           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'approvedBy', 'receivedBy', 'paidMinor', 'invoiceNumber', 'updatedAt'])) ||
+          (hasBranchPermission(existing().organizationId, existing().branchId, 'purchases.create') &&
+           existing().status in ['draft', 'pending_approval'] &&
+           incoming().status in ['draft', 'pending_approval'] &&
+           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'invoiceNumber', 'paidMinor', 'updatedAt']))
+        );
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow get: if isValidId(purchaseId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
+        allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+        allow create: if isValidId(purchaseId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidPurchaseItem(incoming()) &&
+          hasBranchPermission(incoming().organizationId, incoming().branchId, 'purchases.create') &&
+          incoming().purchaseId == purchaseId &&
+          incoming().itemId == itemId;
+        allow update, delete: if false;
+      }
+    }
+
+    match /stockTransfers/{transferId} {
+      allow get: if isValidId(transferId) && isVerifiedOrProvisionedUser() && (
+        hasBranchAccess(existing().organizationId, existing().sourceBranchId) ||
+        hasBranchAccess(existing().organizationId, existing().destinationBranchId)
+      );
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(transferId) && isVerifiedOrProvisionedUser() && isValidStockTransfer(incoming()) &&
+        hasBranchPermission(incoming().organizationId, incoming().sourceBranchId, 'inventory.transfer') &&
+        incoming().transferId == transferId &&
+        incoming().requestedBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(transferId) && isVerifiedOrProvisionedUser() && isValidStockTransfer(incoming()) &&
+        incoming().transferId == existing().transferId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().sourceBranchId == existing().sourceBranchId &&
+        incoming().destinationBranchId == existing().destinationBranchId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        !(existing().status in ['received', 'rejected', 'cancelled']) &&
+        (
+          hasPermission(existing().organizationId, 'inventory.approve') ||
+          hasBranchPermission(existing().organizationId, existing().sourceBranchId, 'inventory.transfer') ||
+          hasBranchPermission(existing().organizationId, existing().destinationBranchId, 'inventory.transfer')
+        ) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'approvedBy', 'dispatchedBy', 'receivedBy', 'notes', 'updatedAt']);
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow get: if isValidId(transferId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
+        allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+        allow create: if isValidId(transferId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidTransferItem(incoming()) &&
+          hasPermission(incoming().organizationId, 'inventory.transfer') &&
+          incoming().transferId == transferId &&
+          incoming().itemId == itemId;
+        allow update: if isValidId(transferId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidTransferItem(incoming()) &&
+          hasPermission(existing().organizationId, 'inventory.transfer') &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['receivedQuantity', 'damagedQuantity']);
+        allow delete: if false;
+      }
+    }
+
+    match /refunds/{refundId} {
+      allow get: if isValidId(refundId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(refundId) && isVerifiedOrProvisionedUser() && isValidRefund(incoming()) &&
+        hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.refund') &&
+        incoming().refundId == refundId &&
+        incoming().requestedBy == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(refundId) && isVerifiedOrProvisionedUser() && isValidRefund(incoming()) &&
+        hasBranchPermission(existing().organizationId, existing().branchId, 'sales.approve') &&
+        existing().status in ['pending', 'approved'] &&
+        incoming().refundId == existing().refundId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().branchId == existing().branchId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'approvedBy', 'updatedAt']);
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow get: if isValidId(refundId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
+        allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+        allow create: if isValidId(refundId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidRefundItem(incoming()) &&
+          hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.refund') &&
+          incoming().refundId == refundId &&
+          incoming().itemId == itemId;
+        allow update, delete: if false;
+      }
+    }
+
+    match /cashSessions/{sessionId} {
+      allow get: if isValidId(sessionId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(sessionId) && isVerifiedOrProvisionedUser() && isValidCashSession(incoming()) &&
+        hasBranchPermission(incoming().organizationId, incoming().branchId, 'cashSessions.open') &&
+        incoming().sessionId == sessionId &&
+        incoming().cashierId == request.auth.uid &&
+        incoming().status == 'open' &&
+        incoming().openedAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(sessionId) && isVerifiedOrProvisionedUser() && isValidCashSession(incoming()) &&
+        incoming().sessionId == existing().sessionId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().branchId == existing().branchId &&
+        incoming().cashierId == existing().cashierId &&
+        incoming().openedAt == existing().openedAt &&
+        incoming().updatedAt == request.time &&
+        existing().status != 'approved' && (
+          (
+            existing().status == 'open' &&
+            hasBranchAccess(existing().organizationId, existing().branchId) &&
+            (
+              existing().cashierId == request.auth.uid ||
+              hasAnyBranchPermission(existing().organizationId, existing().branchId, ['cashSessions.close', 'sales.approve'])
+            ) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['cashSalesMinor', 'cashRefundsMinor', 'cashDepositsMinor', 'cashWithdrawalsMinor', 'expectedClosingBalanceMinor', 'actualClosingBalanceMinor', 'differenceMinor', 'status', 'closedAt', 'updatedAt'])
+          ) ||
+          (
+            existing().status == 'closed' &&
+            incoming().status == 'approved' &&
+            hasBranchPermission(existing().organizationId, existing().branchId, 'cashSessions.approve') &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'approvedBy', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+
+      match /transactions/{transactionId} {
+        allow get: if isValidId(sessionId) && isValidId(transactionId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
+        allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+        allow create: if isValidId(sessionId) && isValidId(transactionId) && isVerifiedOrProvisionedUser() && isValidCashSessionTx(incoming()) &&
+          hasBranchAccess(incoming().organizationId, incoming().branchId) &&
+          get(/databases/$(database)/documents/cashSessions/$(sessionId)).data.status == 'open' &&
+          incoming().sessionId == sessionId &&
+          incoming().transactionId == transactionId &&
+          incoming().performedBy == request.auth.uid &&
+          incoming().createdAt == request.time;
+        allow update, delete: if false;
+      }
+    }
+
+    match /expenses/{expenseId} {
+      allow get: if isValidId(expenseId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(expenseId) && isVerifiedOrProvisionedUser() && isValidExpense(incoming()) &&
+        hasBranchPermission(incoming().organizationId, incoming().branchId, 'expenses.create') &&
+        incoming().expenseId == expenseId &&
+        incoming().submittedBy == request.auth.uid &&
+        incoming().approvalStatus == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(expenseId) && isVerifiedOrProvisionedUser() && isValidExpense(incoming()) &&
+        hasBranchPermission(existing().organizationId, existing().branchId, 'expenses.approve') &&
+        existing().approvalStatus == 'pending' &&
+        incoming().expenseId == existing().expenseId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().branchId == existing().branchId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['approvalStatus', 'approvedBy', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /auditLogs/{logId} {
+      allow get: if isValidId(logId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || hasPermission(existing().organizationId, 'auditLogs.view'));
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(logId) && isVerifiedOrProvisionedUser() && isValidAuditLog(incoming()) &&
+        (isBootstrapAdmin() || isOrgMember(incoming().organizationId)) &&
+        incoming().logId == logId &&
+        incoming().userId == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /branchDailySummaries/{summaryId} {
+      allow get: if isValidCompositeId(summaryId) && isVerifiedOrProvisionedUser() && (resource == null || hasBranchAccess(existing().organizationId, existing().branchId));
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create, update: if isValidCompositeId(summaryId) && isVerifiedOrProvisionedUser() && isValidBranchDailySummary(incoming()) &&
+        hasBranchAccess(incoming().organizationId, incoming().branchId) &&
+        incoming().summaryId == summaryId &&
+        incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /systemSettings/{settingId} {
+      allow get: if isValidId(settingId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || isOrgMember(existing().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create, update: if isValidId(settingId) && isVerifiedOrProvisionedUser() && isValidSystemSettings(incoming()) &&
+        (isBootstrapAdmin() || hasPermission(incoming().organizationId, 'settings.manage')) &&
+        incoming().settingId == settingId &&
+        incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
+      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(notificationId) && isVerifiedOrProvisionedUser() && isValidNotification(incoming()) &&
+        isOrgMember(incoming().organizationId) &&
+        incoming().notificationId == notificationId &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(notificationId) && isVerifiedOrProvisionedUser() && isValidNotification(incoming()) &&
+        isOrgMember(existing().organizationId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['readBy']);
+      allow delete: if false;
+    }
+
+    match /idempotencyKeys/{keyId} {
+      allow get: if isValidId(keyId) && isVerifiedOrProvisionedUser() && (resource == null || hasBranchAccess(existing().organizationId, existing().branchId));
+      allow list: if false;
+      allow create: if isValidId(keyId) && isVerifiedOrProvisionedUser() && isValidIdempotencyKey(incoming()) &&
+        hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.create') &&
+        incoming().keyId == keyId &&
+        incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+  }
+}

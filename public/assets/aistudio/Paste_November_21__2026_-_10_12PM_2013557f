@@ -1,0 +1,1394 @@
+
+PROJECT TITLE:
+ENTERPRISE MULTI-BRANCH RETAIL POS AND INVENTORY MANAGEMENT SYSTEM
+
+========================================================
+1. PROJECT OVERVIEW
+========================================================
+
+Build a complete, professional, enterprise-grade, cloud-based Multi-Branch Retail Point of Sale (POS) and Inventory Management System.
+
+The application must support multiple retail branches operating under one centralized organization.
+
+Each branch must maintain its own:
+- Sales records.
+- Inventory records.
+- Purchases.
+- Expenses.
+- Customers, where branch-specific.
+- Cashier transactions.
+- Cash register sessions.
+- Stock movements.
+- Branch reports.
+- Staff activities.
+
+The Head Office Administrator must have centralized control over all branches.
+
+The system must provide separate registration, authentication, dashboards, roles and permissions for administrators, branch administrators, supervisors and cashiers.
+
+The application must be fully functional, responsive, secure, scalable and ready for eventual production deployment.
+
+Do not build only a static UI prototype. All application features must connect to the backend and Firebase database.
+
+========================================================
+2. TECHNOLOGY STACK
+========================================================
+
+Use the following technologies:
+
+FRONTEND:
+- React.js.
+- TypeScript.
+- Tailwind CSS.
+- Reusable UI components.
+- Responsive design.
+- React Router.
+- Form validation.
+
+BACKEND:
+- Node.js.
+- TypeScript.
+- Express.js.
+- REST API architecture.
+- Firebase Admin SDK.
+- Server-side business logic.
+- Backend authorization middleware.
+
+DATABASE:
+- Google Firebase Cloud Firestore.
+
+AUTHENTICATION:
+- Firebase Authentication.
+
+CLOUD HOSTING:
+- Google Cloud Run.
+
+FILE STORAGE:
+- Firebase Storage or Google Cloud Storage.
+
+MONITORING:
+- Google Cloud Logging.
+- Google Cloud Monitoring.
+
+DEVELOPMENT:
+- Google AI Studio Build mode.
+- Firebase Emulator Suite for local testing.
+
+Use a modular architecture with separate components, pages, API services, controllers, middleware, repositories, validation schemas and utility functions.
+
+Do not place the entire application in one source file.
+
+========================================================
+3. APPLICATION ARCHITECTURE
+========================================================
+
+Build a centralized multi-tenant and multi-branch application.
+
+The application must have:
+
+1. Central Head Office Administration.
+2. Multiple retail branches.
+3. Independent branch operations.
+4. Centralized product catalogue.
+5. Branch-specific inventory.
+6. Centralized user and role management.
+7. Dynamic permission policies.
+8. Consolidated business reporting.
+
+Use one centralized Firestore database.
+
+Each organization must have an organizationId.
+
+Every branch-specific record must also contain a branchId.
+
+Never trust a branchId supplied by the browser without validating it against the authenticated user's assigned branches.
+
+The backend must determine the user's authorized organization and branch access.
+
+Initially, configure the application to support one organization with multiple branches, but design the database to support multiple organizations in the future.
+
+========================================================
+4. AUTHENTICATION AND USER REGISTRATION
+========================================================
+
+Implement Firebase Authentication.
+
+Provide:
+- Login.
+- Logout.
+- Forgot password.
+- Password reset.
+- Account activation.
+- Account suspension.
+- Secure session management.
+- Login activity.
+- Last login.
+- User invitation.
+
+Registration must be controlled by authorized administrators.
+
+Do not allow unrestricted public account registration.
+
+The first Super Admin must be initialized using a secure server-side bootstrap process.
+
+Never hardcode default administrator credentials in the application.
+
+User profile fields:
+
+- uid.
+- fullName.
+- email.
+- phone.
+- organizationId.
+- branchIds.
+- defaultBranchId.
+- roleId.
+- accountStatus.
+- createdAt.
+- updatedAt.
+- lastLogin.
+
+Support users assigned to multiple branches, with one default branch.
+
+When users log in, load their assigned roles, branch access and permissions.
+
+A user must never access a branch to which they have not been assigned unless their role explicitly grants organization-wide access.
+
+========================================================
+5. ROLE-BASED ACCESS CONTROL (RBAC)
+========================================================
+
+Create the following default roles:
+
+1. Super Admin.
+2. Branch Administrator.
+3. Supervisor.
+4. Cashier.
+5. Custom Administrator-Defined Roles.
+
+The Super Admin must have access to all branches and global configurations.
+
+The Branch Administrator manages only their assigned branch and authorized features.
+
+The Supervisor manages daily branch operations and authorized approvals.
+
+The Cashier primarily processes sales and performs authorized POS operations.
+
+IMPORTANT:
+
+Do not hardcode permissions permanently into the application.
+
+Create a dynamic Permission Management module where the Super Admin can:
+
+- Create roles.
+- Edit roles.
+- Delete unused roles.
+- Assign permissions to roles.
+- Remove permissions.
+- Assign roles to users.
+- Assign users to branches.
+- Override individual user permissions.
+- Activate or deactivate roles.
+- View assigned permissions.
+
+Permissions must be configurable without modifying source code.
+
+SUPPORT THE FOLLOWING ACTIONS:
+
+- View.
+- Create.
+- Edit.
+- Delete.
+- Approve.
+- Reject.
+- Export.
+- Print.
+- Manage.
+
+CREATE PERMISSION IDENTIFIERS:
+
+dashboard.view
+
+sales.view
+sales.create
+sales.edit
+sales.cancel
+sales.refund
+sales.approve
+sales.export
+
+products.view
+products.create
+products.edit
+products.delete
+
+inventory.view
+inventory.adjust
+inventory.transfer
+inventory.approve
+inventory.export
+
+purchases.view
+purchases.create
+purchases.approve
+
+suppliers.view
+suppliers.manage
+
+customers.view
+customers.create
+customers.edit
+customers.delete
+
+expenses.view
+expenses.create
+expenses.approve
+
+cashSessions.view
+cashSessions.open
+cashSessions.close
+cashSessions.approve
+
+reports.view
+reports.export
+
+users.view
+users.create
+users.edit
+users.suspend
+users.manage
+
+branches.view
+branches.create
+branches.edit
+branches.manage
+
+roles.view
+roles.create
+roles.edit
+roles.delete
+roles.manage
+
+settings.view
+settings.manage
+
+auditLogs.view
+
+Implement authorization on every protected backend API endpoint.
+
+Frontend menu visibility must reflect user permissions, but frontend restrictions must never be treated as the security boundary.
+
+A Supervisor may have permission to approve refunds in Branch 1 but must not automatically have permission to approve refunds in Branch 2.
+
+Validate permissions and branch assignments independently.
+
+========================================================
+6. ORGANIZATION AND BRANCH MANAGEMENT
+========================================================
+
+Create an Organization Management module.
+
+Organization fields:
+- Organization ID.
+- Business name.
+- Registration number.
+- Logo.
+- Email.
+- Phone.
+- Address.
+- Country.
+- Currency.
+- Timezone.
+- Tax configuration.
+- Status.
+
+Create a Branch Management module.
+
+The Super Admin must be able to:
+
+- Register branches.
+- Edit branch information.
+- Activate branches.
+- Suspend branches.
+- Assign branch administrators.
+- Assign supervisors.
+- Assign cashiers.
+- View branch performance.
+- View branch inventory.
+- View branch sales.
+- Compare branch performance.
+
+Branch fields:
+
+- Branch ID.
+- Organization ID.
+- Branch code.
+- Branch name.
+- Address.
+- City.
+- Region.
+- Country.
+- Contact number.
+- Email.
+- Manager.
+- Operating hours.
+- Status.
+- Created date.
+
+Generate unique branch codes automatically.
+
+Allow the organization to register unlimited branches subject to system and billing limits.
+
+Each branch must have separate operational records.
+
+========================================================
+7. APPLICATION DASHBOARDS
+========================================================
+
+Create professional dashboards that change according to the logged-in user's role and permissions.
+
+SUPER ADMIN DASHBOARD:
+
+Display:
+- Total organizations.
+- Total branches.
+- Active branches.
+- Total users.
+- Total sales.
+- Total revenue.
+- Total expenses.
+- Gross profit.
+- Best-performing branches.
+- Best-selling products.
+- Low-stock alerts.
+- Recent transactions.
+- Sales trends.
+- Branch comparison charts.
+
+Provide date filters:
+- Today.
+- Yesterday.
+- Last 7 days.
+- Last 30 days.
+- This month.
+- Last month.
+- Custom date range.
+
+BRANCH ADMIN DASHBOARD:
+
+Display:
+- Branch revenue.
+- Daily sales.
+- Monthly sales.
+- Branch expenses.
+- Inventory value.
+- Low-stock products.
+- Cashier performance.
+- Recent transactions.
+- Pending approvals.
+
+SUPERVISOR DASHBOARD:
+
+Display:
+- Daily sales.
+- Cashier activity.
+- Pending refund approvals.
+- Stock alerts.
+- Cash session activity.
+- Branch operational summary.
+
+CASHIER DASHBOARD:
+
+Display:
+- POS access.
+- Today's sales.
+- Current cash session.
+- Personal transaction history.
+- Authorized features.
+
+All dashboard statistics must come from actual database records.
+
+Do not use hardcoded statistics or fake production data.
+
+========================================================
+8. PRODUCT MANAGEMENT
+========================================================
+
+Build a complete Product Management module.
+
+Features:
+- Create products.
+- Edit products.
+- Archive products.
+- Product categories.
+- Product images.
+- SKU.
+- Barcode.
+- Product description.
+- Brand.
+- Unit of measurement.
+- Cost price.
+- Selling price.
+- Wholesale price.
+- Tax category.
+- Minimum stock.
+- Product status.
+
+Allow authorized administrators to manage the central product catalogue.
+
+Products can be made available to selected branches.
+
+Each branch must maintain its own stock quantities.
+
+Avoid deleting products that have historical transactions. Use archival instead.
+
+========================================================
+9. INVENTORY MANAGEMENT
+========================================================
+
+Build a complete branch-specific inventory system.
+
+Features:
+- View current stock.
+- Add stock.
+- Reduce stock.
+- Stock adjustment.
+- Stock counting.
+- Damaged stock.
+- Expired stock.
+- Low-stock notifications.
+- Inventory valuation.
+- Stock movement history.
+- Reorder levels.
+- Stock discrepancy reporting.
+
+Create a branchInventory collection.
+
+Every inventory record must include:
+
+- organizationId.
+- branchId.
+- productId.
+- quantityAvailable.
+- reorderLevel.
+- costPrice.
+- sellingPrice.
+- updatedAt.
+
+Each branch must have independent stock quantities.
+
+The same product can have different stock quantities at different branches.
+
+Every stock movement must record:
+
+- Movement ID.
+- Organization ID.
+- Branch ID.
+- Product ID.
+- Movement type.
+- Quantity.
+- Previous quantity.
+- New quantity.
+- Reference transaction.
+- Performed by.
+- Timestamp.
+
+Never change inventory without recording a stock movement.
+
+Prevent negative inventory unless an authorized organization-level policy explicitly permits it.
+
+========================================================
+10. POINT OF SALE (POS)
+========================================================
+
+Build a professional, fast and responsive POS terminal.
+
+The POS interface must be optimized for retail cashier operations.
+
+FEATURES:
+
+- Barcode scanning.
+- Product search.
+- Category filters.
+- Product grid.
+- Product images.
+- Shopping cart.
+- Add products.
+- Remove products.
+- Increase quantities.
+- Decrease quantities.
+- Product discounts.
+- Authorized transaction discounts.
+- Tax calculation.
+- Subtotal.
+- Grand total.
+- Customer selection.
+- Multiple payment methods.
+- Payment confirmation.
+- Receipt generation.
+- Receipt printing.
+- PDF receipt download.
+- Sales history.
+
+PAYMENT METHODS:
+
+- Cash.
+- Mobile Money.
+- Card.
+- Bank transfer.
+- Split payment.
+
+Support GHS as the initial currency.
+
+Allow administrators to configure the organization's currency and supported payment methods.
+
+SALES RECORD:
+
+- Sale ID.
+- Transaction number.
+- Organization ID.
+- Branch ID.
+- Cashier ID.
+- Customer ID.
+- Products.
+- Quantities.
+- Unit prices.
+- Discounts.
+- Tax.
+- Subtotal.
+- Total.
+- Payment breakdown.
+- Payment status.
+- Sale status.
+- Created timestamp.
+
+Use unique transaction numbers.
+
+Use idempotency keys to prevent duplicate transactions.
+
+Use Firestore transactions for sale creation and inventory deduction.
+
+All payment verification and stock deduction must happen on the backend.
+
+Never allow users to manipulate transaction totals through frontend requests.
+
+If payment provider integration is unavailable, clearly indicate that the payment is not yet integrated.
+
+========================================================
+11. RECEIPT MANAGEMENT
+========================================================
+
+Generate professional retail receipts.
+
+Receipt must include:
+
+- Organization logo.
+- Organization name.
+- Branch name.
+- Branch address.
+- Branch contact.
+- Receipt number.
+- Date and time.
+- Cashier name.
+- Products purchased.
+- Quantity.
+- Unit price.
+- Discount.
+- Tax.
+- Total.
+- Payment method.
+- Amount received.
+- Change.
+- Return policy.
+- Thank-you message.
+
+Allow administrators to customize receipt headers and footers.
+
+Support standard receipt printers and downloadable PDF receipts.
+
+========================================================
+12. CUSTOMER MANAGEMENT
+========================================================
+
+Build customer management.
+
+Features:
+- Customer registration.
+- Full name.
+- Phone.
+- Email.
+- Address.
+- Customer purchase history.
+- Total purchases.
+- Transaction history.
+- Customer search.
+- Customer editing.
+
+Allow anonymous sales without requiring customer registration.
+
+Support organization-wide customer records while enforcing appropriate privacy and branch access.
+
+========================================================
+13. SUPPLIER AND PURCHASE MANAGEMENT
+========================================================
+
+Build Supplier Management.
+
+Supplier fields:
+- Supplier ID.
+- Name.
+- Contact person.
+- Phone.
+- Email.
+- Address.
+- Tax identification, where applicable.
+- Status.
+
+Build Purchase Management.
+
+Features:
+- Purchase orders.
+- Supplier selection.
+- Products.
+- Quantities.
+- Unit costs.
+- Discounts.
+- Taxes.
+- Purchase total.
+- Approval workflow.
+- Goods received.
+- Supplier invoices.
+- Outstanding balances.
+- Purchase history.
+
+When goods are received, update branch inventory using a secure transaction.
+
+========================================================
+14. INTER-BRANCH STOCK TRANSFERS
+========================================================
+
+Build a complete stock transfer system.
+
+Allow authorized users to:
+
+- Create transfer requests.
+- Select source branch.
+- Select destination branch.
+- Select products.
+- Enter quantities.
+- Submit transfer.
+- Approve transfer.
+- Reject transfer.
+- Dispatch stock.
+- Confirm stock receipt.
+- Record shortages or damages.
+
+Transfer statuses:
+
+- Draft.
+- Pending Approval.
+- Approved.
+- Dispatched.
+- Partially Received.
+- Received.
+- Rejected.
+- Cancelled.
+
+Do not increase destination stock until goods are received.
+
+Ensure stock is not deducted or added twice.
+
+Maintain full transfer history.
+
+========================================================
+15. RETURNS AND REFUNDS
+========================================================
+
+Build a complete returns and refunds module.
+
+Features:
+- Search original transaction.
+- Select purchased products.
+- Enter returned quantities.
+- Return reason.
+- Calculate refund.
+- Submit refund request.
+- Supervisor approval.
+- Refund processing.
+- Restock returned goods where appropriate.
+- Record damaged returned goods.
+
+Every refund must reference the original sale.
+
+Prevent refunds exceeding the original purchased quantities after previous returns.
+
+Record every refund in the audit log.
+
+========================================================
+16. CASH REGISTER AND CASHIER SHIFTS
+========================================================
+
+Build Cash Register Management.
+
+Features:
+- Open cash session.
+- Opening balance.
+- Cash sales.
+- Cash refunds.
+- Cash deposits.
+- Cash withdrawals.
+- Expected closing balance.
+- Actual closing balance.
+- Cash difference.
+- Supervisor approval.
+- Session history.
+
+Each cashier must have a properly tracked session.
+
+Prevent unauthorized editing of closed cash sessions.
+
+========================================================
+17. EXPENSE MANAGEMENT
+========================================================
+
+Build Expense Management.
+
+Features:
+- Create expenses.
+- Expense categories.
+- Description.
+- Amount.
+- Expense date.
+- Supporting documents.
+- Branch ID.
+- Submitted by.
+- Approval status.
+- Approved by.
+
+Allow administrators to define expense approval limits.
+
+========================================================
+18. REPORTING AND ANALYTICS
+========================================================
+
+Build a complete reporting system.
+
+SALES REPORTS:
+
+- Daily sales.
+- Weekly sales.
+- Monthly sales.
+- Annual sales.
+- Branch sales.
+- Cashier sales.
+- Product sales.
+- Payment method reports.
+
+INVENTORY REPORTS:
+
+- Stock levels.
+- Low stock.
+- Inventory valuation.
+- Stock movements.
+- Damaged products.
+- Expired products.
+- Stock transfers.
+
+FINANCIAL REPORTS:
+
+- Revenue.
+- Cost of goods sold.
+- Gross profit.
+- Discounts.
+- Refunds.
+- Expenses.
+- Net operating result.
+
+MANAGEMENT REPORTS:
+
+- Branch performance.
+- Cashier performance.
+- Best-selling products.
+- Slow-moving products.
+- Purchase reports.
+- Supplier reports.
+- Customer reports.
+- Audit reports.
+
+Provide:
+- Date filters.
+- Branch filters.
+- Product filters.
+- Category filters.
+- Cashier filters.
+- Export to CSV.
+- Export to PDF.
+- Printable reports.
+
+Ensure financial calculations are accurate.
+
+Gross profit must account for cost of goods sold, discounts and returns.
+
+Clearly distinguish gross profit from net profit.
+
+Do not present revenue as profit.
+
+========================================================
+19. USER AND STAFF MANAGEMENT
+========================================================
+
+Create a complete User Management module.
+
+Features:
+- Register users.
+- Invite users.
+- Edit users.
+- Assign branches.
+- Assign roles.
+- Assign custom permissions.
+- Activate accounts.
+- Suspend accounts.
+- Reset access.
+- View login history.
+- View staff activity.
+
+Allow a user to belong to multiple branches where authorized.
+
+A user must have a default branch.
+
+Changing the active branch must trigger a fresh backend authorization check.
+
+========================================================
+20. PERMISSION MANAGEMENT DASHBOARD
+========================================================
+
+Create an interactive permission matrix.
+
+Rows should represent application modules.
+
+Columns should represent roles.
+
+Example:
+
+Feature                 Super Admin  Branch Admin  Supervisor  Cashier
+
+Dashboard View              YES          YES          YES        YES
+POS Sales                    YES          YES          YES        YES
+Inventory View               YES          YES          YES        YES
+Inventory Adjustment         YES          YES          YES         NO
+Purchases                    YES          YES          YES         NO
+Supplier Management          YES          YES           NO         NO
+Refund Approval              YES          YES          YES         NO
+Expense Approval             YES          YES          YES         NO
+User Management              YES          YES           NO         NO
+Branch Management            YES           NO           NO         NO
+Global Reports               YES           NO           NO         NO
+Access Policies              YES           NO           NO         NO
+
+This table is an initial default configuration only.
+
+The Super Admin must be able to change all permissions.
+
+Support individual permission overrides.
+
+Show a clear confirmation before saving permission changes.
+
+Record permission changes in the audit log.
+
+========================================================
+21. AUDIT LOGGING
+========================================================
+
+Create centralized Audit Logs.
+
+Record:
+- Successful login.
+- Failed login.
+- User registration.
+- User suspension.
+- Role creation.
+- Permission changes.
+- Branch creation.
+- Product changes.
+- Price changes.
+- Stock adjustments.
+- Sales.
+- Refunds.
+- Purchase approvals.
+- Expense approvals.
+- Cash session closure.
+- Stock transfers.
+
+Each log must contain:
+
+- Log ID.
+- User ID.
+- Organization ID.
+- Branch ID.
+- Action.
+- Resource type.
+- Resource ID.
+- Timestamp.
+- Request ID.
+- Relevant change details.
+
+Audit logs must be written by the backend.
+
+Ordinary users must not edit or delete audit records.
+
+========================================================
+22. FIRESTORE DATABASE STRUCTURE
+========================================================
+
+Create the following collections:
+
+organizations
+branches
+users
+roles
+permissions
+invitations
+products
+categories
+branchInventory
+sales
+purchases
+suppliers
+customers
+stockTransfers
+stockMovements
+expenses
+payments
+refunds
+cashSessions
+auditLogs
+branchDailySummaries
+systemSettings
+
+Use organizationId on every organization-owned record.
+
+Use branchId on every branch-specific record.
+
+Use server-generated timestamps.
+
+Use appropriate Firestore document IDs and references.
+
+Create subcollections where appropriate for:
+- Sale items.
+- Purchase items.
+- Refund items.
+- Transfer items.
+- Cash session transactions.
+
+Do not store unlimited arrays inside one Firestore document.
+
+Do not create oversized documents.
+
+Create necessary composite indexes.
+
+Optimize query structures for:
+- Organization.
+- Branch.
+- Date.
+- Transaction status.
+- Product.
+- Cashier.
+- Supplier.
+- User.
+
+Document the complete Firestore schema.
+
+========================================================
+23. SECURITY AND FIRESTORE RULES
+========================================================
+
+Security is a mandatory requirement.
+
+Implement:
+
+- Firebase Authentication.
+- Firebase Admin SDK.
+- Backend token verification.
+- Organization validation.
+- Branch validation.
+- Permission validation.
+- Account status validation.
+- Rate limiting.
+- Input validation.
+- Secure API error handling.
+- Cloud IAM.
+- Secret Manager.
+- Firebase App Check where supported.
+
+Use backend-only access for sensitive business data.
+
+Firestore Security Rules must deny direct client access by default when the backend API is responsible for business operations.
+
+Do not deploy unrestricted Firestore test rules.
+
+Remember that Firebase Admin SDK bypasses Firestore Security Rules.
+
+Therefore, implement all relevant security checks in backend middleware and business services.
+
+Never trust organizationId, branchId, userId, permissions or prices supplied by the frontend without verification.
+
+Prevent:
+- Cross-branch access.
+- Cross-organization access.
+- Unauthorized refunds.
+- Unauthorized stock adjustments.
+- Duplicate sales.
+- Unauthorized role escalation.
+- Unauthorized permission changes.
+
+========================================================
+24. FIRESTORE TRANSACTION INTEGRITY
+========================================================
+
+Use Firestore atomic transactions for:
+
+- Sale creation and inventory deduction.
+- Purchase receiving and inventory addition.
+- Stock transfer dispatch.
+- Stock transfer receiving.
+- Refund processing.
+- Cash session closing.
+
+Validate stock quantities inside the transaction.
+
+Use idempotency keys for important financial operations.
+
+Do not send payment provider requests inside a Firestore transaction callback because transaction callbacks can be retried.
+
+Use a reliable payment workflow with payment verification, idempotency and reconciliation.
+
+Use integer minor currency units or another carefully defined monetary representation to avoid floating-point financial errors.
+
+========================================================
+25. APPLICATION UI AND DESIGN
+========================================================
+
+Build a modern, professional enterprise SaaS interface.
+
+DESIGN STYLE:
+
+- Clean white background.
+- Light grey surfaces.
+- Dark navy text.
+- Professional green accent.
+- Modern typography.
+- Consistent spacing.
+- Rounded cards.
+- Clear tables.
+- Professional charts.
+- Responsive navigation.
+
+Create:
+
+1. Login page.
+2. Forgot password page.
+3. Organization setup page.
+4. Super Admin dashboard.
+5. Branch Admin dashboard.
+6. Supervisor dashboard.
+7. Cashier dashboard.
+8. POS terminal.
+9. Product management.
+10. Inventory management.
+11. Purchase management.
+12. Supplier management.
+13. Customer management.
+14. Stock transfer management.
+15. Expense management.
+16. Refund management.
+17. Cash register.
+18. Reporting.
+19. User management.
+20. Role management.
+21. Permission management.
+22. Branch management.
+23. Audit logs.
+24. System settings.
+
+Create reusable sidebar navigation.
+
+Generate menu items dynamically from the user's permissions.
+
+Include:
+- Notifications.
+- User profile.
+- Active branch selector.
+- Global search.
+- Tables.
+- Pagination.
+- Sorting.
+- Filtering.
+- Confirmation dialogs.
+- Toast notifications.
+- Loading indicators.
+- Empty states.
+- Error states.
+
+All buttons and forms must work.
+
+Do not create decorative controls that do nothing.
+
+========================================================
+26. SEARCH AND FILTERING
+========================================================
+
+Implement application-wide search where appropriate.
+
+Support searching:
+- Products.
+- Barcodes.
+- SKU.
+- Sales receipt numbers.
+- Customers.
+- Suppliers.
+- Users.
+- Branches.
+
+Implement date range filters and branch filters.
+
+Ensure every query respects organization and branch authorization.
+
+========================================================
+27. NOTIFICATIONS
+========================================================
+
+Build an in-app notification centre.
+
+Notifications should support:
+- Low stock.
+- Pending approvals.
+- New stock transfers.
+- Completed purchases.
+- Refund requests.
+- Cash session discrepancies.
+- Account invitations.
+- Important administrative alerts.
+
+Notifications must be targeted to authorized users and branches.
+
+========================================================
+28. CONFIGURATION AND SYSTEM SETTINGS
+========================================================
+
+Create configurable settings for:
+
+- Organization information.
+- Branch details.
+- Currency.
+- Timezone.
+- Tax rates.
+- Receipt templates.
+- Payment methods.
+- Discount policies.
+- Inventory rules.
+- Refund policies.
+- Approval limits.
+- User policies.
+- Notification settings.
+
+Initial defaults:
+- Currency: GHS.
+- Currency symbol: GH₵.
+- Timezone: Africa/Accra.
+- Country: Ghana.
+
+These must remain configurable.
+
+========================================================
+29. CLOUD DEPLOYMENT
+========================================================
+
+Prepare the application for deployment on Google Cloud.
+
+Use:
+- Google Cloud Run.
+- Firebase Authentication.
+- Cloud Firestore.
+- Cloud Storage.
+- Secret Manager.
+- Cloud Logging.
+- Cloud Monitoring.
+
+Prepare:
+- Environment variable configuration.
+- Production build scripts.
+- Backend health check.
+- Secure service account.
+- Least-privilege IAM configuration.
+- Database indexes.
+- Production Firestore rules.
+- Deployment documentation.
+- Backup and recovery strategy.
+
+Never expose service account credentials in frontend code or source control.
+
+Do not use development-only configurations in production.
+
+Keep Firebase configuration and privileged server credentials separate.
+
+========================================================
+30. TESTING
+========================================================
+
+Create automated tests for:
+
+AUTHENTICATION:
+- Valid login.
+- Invalid login.
+- Suspended account.
+- Password reset.
+
+AUTHORIZATION:
+- Cashier cannot access administration.
+- Supervisor cannot access unauthorized branches.
+- Branch Administrator cannot access another branch.
+- Super Admin can access authorized organization-wide functions.
+- Unauthorized API requests return 403.
+
+POS:
+- Successful sales.
+- Insufficient stock.
+- Duplicate transaction.
+- Refund.
+- Receipt generation.
+
+INVENTORY:
+- Stock deduction.
+- Stock addition.
+- Stock transfer.
+- Negative stock prevention.
+- Concurrent sales.
+
+DATABASE:
+- Organization isolation.
+- Branch isolation.
+- Firestore rules.
+- Transaction consistency.
+
+Use Firebase Emulator Suite for development and security testing.
+
+========================================================
+31. DEVELOPMENT EXECUTION INSTRUCTIONS
+========================================================
+
+Build the application in logical stages.
+
+STAGE 1:
+- Project setup.
+- Firebase integration.
+- Authentication.
+- Organization registration.
+- Branch registration.
+- User registration.
+- Dynamic RBAC.
+- Secure backend.
+- Firestore schema.
+
+STAGE 2:
+- Super Admin dashboard.
+- Branch dashboards.
+- User management.
+- Role management.
+- Permission management.
+- Audit logs.
+
+STAGE 3:
+- Product management.
+- Categories.
+- Inventory.
+- Stock adjustments.
+- Stock movements.
+- Low-stock alerts.
+
+STAGE 4:
+- POS.
+- Barcode scanning.
+- Shopping cart.
+- Sales.
+- Payments.
+- Receipts.
+- Cash sessions.
+- Refunds.
+
+STAGE 5:
+- Suppliers.
+- Purchases.
+- Goods receiving.
+- Stock transfers.
+- Expenses.
+
+STAGE 6:
+- Reports.
+- Analytics.
+- Notifications.
+- Financial summaries.
+
+STAGE 7:
+- Security testing.
+- Automated testing.
+- Performance optimization.
+- Cloud deployment.
+- Production validation.
+
+Do not skip stages.
+
+Complete and test each stage before moving to the next.
+
+If an integration requires external credentials, create the integration interface and clearly identify the missing configuration. Never pretend an external service has been connected.
+
+If the complete application cannot be generated in one execution, preserve the architecture and continue implementing the remaining modules without replacing working functionality.
+
+Do not delete or overwrite completed modules when implementing new features.
+
+Maintain a clear project checklist showing:
+- Completed modules.
+- Incomplete modules.
+- Database integrations.
+- Security tests.
+- Deployment status.
+
+========================================================
+32. FINAL ACCEPTANCE REQUIREMENTS
+========================================================
+
+The application will only be considered complete when:
+
+1. Users can securely register and log in.
+2. Super Admin can create and manage branches.
+3. Branch users can access only authorized branch records.
+4. Administrators can dynamically assign permissions.
+5. Different roles see different dashboards.
+6. Products can be registered and managed.
+7. Each branch has independent inventory.
+8. Cashiers can process sales.
+9. Inventory updates correctly after sales.
+10. Receipts can be generated and printed.
+11. Purchases and stock transfers work.
+12. Refunds follow approval policies.
+13. Cashier shifts can be opened and closed.
+14. Reports display actual database records.
+15. Audit logs capture sensitive activities.
+16. Unauthorized API operations are rejected.
+17. Database transactions maintain consistency.
+18. Application errors are handled correctly.
+19. Automated tests pass.
+20. Application is ready for controlled production deployment.
+
+FINAL INSTRUCTION:
+
+Build a real, secure, scalable enterprise retail management platform.
+
+Prioritize functionality, database integrity, branch isolation, permission enforcement, maintainability and professional user experience.
+
+Do not deliver a static mockup.
+
+Every module must be connected to the backend and Firestore.
+
+Start by establishing the application foundation, Firebase connection, secure authentication, organization management, branch management and dynamic permission engine.
+
+Then proceed through the development stages in order.

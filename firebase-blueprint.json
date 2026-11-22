@@ -1,0 +1,621 @@
+{
+  "entities": {
+    "Organization": {
+      "title": "Organization",
+      "description": "Root retail tenant organization with tax, currency, and receipt configuration.",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessName": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "registrationNumber": { "type": "string", "maxLength": 80 },
+        "logoUrl": { "type": "string", "maxLength": 1000 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "address": { "type": "string", "maxLength": 300 },
+        "country": { "type": "string", "maxLength": 80 },
+        "currency": { "type": "string", "minLength": 3, "maxLength": 8 },
+        "currencySymbol": { "type": "string", "minLength": 1, "maxLength": 8 },
+        "timezone": { "type": "string", "maxLength": 80 },
+        "defaultTaxRateBps": { "type": "number" },
+        "taxLabel": { "type": "string", "maxLength": 40 },
+        "allowNegativeInventory": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "ownerUid": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["organizationId", "businessName", "currency", "currencySymbol", "timezone", "status", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Branch": {
+      "title": "Branch",
+      "description": "Individual retail branch belonging to an organization.",
+      "type": "object",
+      "properties": {
+        "branchId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchCode": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "branchName": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "address": { "type": "string", "maxLength": 300 },
+        "city": { "type": "string", "maxLength": 100 },
+        "region": { "type": "string", "maxLength": 100 },
+        "country": { "type": "string", "maxLength": 80 },
+        "contactNumber": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 160 },
+        "managerName": { "type": "string", "maxLength": 120 },
+        "operatingHours": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["branchId", "organizationId", "branchCode", "branchName", "status", "createdAt", "updatedAt"]
+    },
+    "User": {
+      "title": "User",
+      "description": "Authenticated staff profile with role, assigned branches, and permission overrides.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchIds": { "type": "array" },
+        "defaultBranchId": { "type": "string", "maxLength": 128 },
+        "roleId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "grantedPermissions": { "type": "array" },
+        "deniedPermissions": { "type": "array" },
+        "accountStatus": { "type": "string", "enum": ["active", "suspended", "invited"] },
+        "lastLogin": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "fullName", "email", "organizationId", "branchIds", "defaultBranchId", "roleId", "accountStatus", "createdAt", "updatedAt"]
+    },
+    "Role": {
+      "title": "Role",
+      "description": "Dynamic RBAC role containing configurable permission identifiers.",
+      "type": "object",
+      "properties": {
+        "roleId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 300 },
+        "scope": { "type": "string", "enum": ["organization", "branch"] },
+        "permissions": { "type": "array" },
+        "isSystem": { "type": "boolean" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["roleId", "organizationId", "name", "scope", "permissions", "isSystem", "isActive", "createdAt", "updatedAt"]
+    },
+    "PermissionDefinition": {
+      "title": "PermissionDefinition",
+      "description": "Catalog of dynamic permission identifiers.",
+      "type": "object",
+      "properties": {
+        "permissionId": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "module": { "type": "string", "maxLength": 60 },
+        "action": { "type": "string", "maxLength": 40 },
+        "label": { "type": "string", "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 240 }
+      },
+      "required": ["permissionId", "organizationId", "module", "action", "label"]
+    },
+    "Invitation": {
+      "title": "Invitation",
+      "description": "Administrator-controlled user invitation with pre-assigned role and branches.",
+      "type": "object",
+      "properties": {
+        "invitationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "roleId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchIds": { "type": "array" },
+        "defaultBranchId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["pending", "accepted", "revoked"] },
+        "invitedBy": { "type": "string", "minLength": 2, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["invitationId", "organizationId", "email", "fullName", "roleId", "branchIds", "defaultBranchId", "status", "invitedBy", "createdAt", "updatedAt"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Centralized product category.",
+      "type": "object",
+      "properties": {
+        "categoryId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 300 },
+        "status": { "type": "string", "enum": ["active", "archived"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["categoryId", "organizationId", "name", "status", "createdAt", "updatedAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Central product catalog item.",
+      "type": "object",
+      "properties": {
+        "productId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "categoryId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "sku": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "barcode": { "type": "string", "maxLength": 64 },
+        "description": { "type": "string", "maxLength": 600 },
+        "brand": { "type": "string", "maxLength": 100 },
+        "unit": { "type": "string", "maxLength": 40 },
+        "imageUrl": { "type": "string", "maxLength": 1000 },
+        "costPriceMinor": { "type": "number" },
+        "sellingPriceMinor": { "type": "number" },
+        "wholesalePriceMinor": { "type": "number" },
+        "taxCategory": { "type": "string", "enum": ["standard", "exempt", "zero"] },
+        "minimumStock": { "type": "number" },
+        "availableBranchIds": { "type": "array" },
+        "status": { "type": "string", "enum": ["active", "archived"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["productId", "organizationId", "name", "sku", "costPriceMinor", "sellingPriceMinor", "taxCategory", "minimumStock", "status", "createdAt", "updatedAt"]
+    },
+    "BranchInventory": {
+      "title": "BranchInventory",
+      "description": "Branch-specific inventory quantity and pricing record.",
+      "type": "object",
+      "properties": {
+        "inventoryId": { "type": "string", "minLength": 2, "maxLength": 260 },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "quantityAvailable": { "type": "number" },
+        "reorderLevel": { "type": "number" },
+        "costPriceMinor": { "type": "number" },
+        "sellingPriceMinor": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["inventoryId", "organizationId", "branchId", "productId", "quantityAvailable", "reorderLevel", "costPriceMinor", "sellingPriceMinor", "updatedAt"]
+    },
+    "StockMovement": {
+      "title": "StockMovement",
+      "description": "Immutable inventory ledger movement.",
+      "type": "object",
+      "properties": {
+        "movementId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "movementType": { "type": "string", "enum": ["sale", "purchase_receipt", "adjustment_add", "adjustment_reduce", "stock_count", "damaged", "expired", "transfer_out", "transfer_in", "refund_restock", "refund_damaged"] },
+        "quantity": { "type": "number" },
+        "previousQuantity": { "type": "number" },
+        "newQuantity": { "type": "number" },
+        "referenceType": { "type": "string", "maxLength": 60 },
+        "referenceId": { "type": "string", "maxLength": 128 },
+        "reason": { "type": "string", "maxLength": 300 },
+        "performedBy": { "type": "string", "minLength": 2, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["movementId", "organizationId", "branchId", "productId", "movementType", "quantity", "previousQuantity", "newQuantity", "performedBy", "createdAt"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "POS sale header record.",
+      "type": "object",
+      "properties": {
+        "saleId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 64 },
+        "idempotencyKey": { "type": "string", "minLength": 4, "maxLength": 128 },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "cashierId": { "type": "string", "minLength": 2, "maxLength": 128 },
+        "cashierName": { "type": "string", "maxLength": 160 },
+        "cashSessionId": { "type": "string", "maxLength": 128 },
+        "customerId": { "type": "string", "maxLength": 128 },
+        "customerName": { "type": "string", "maxLength": 160 },
+        "itemCount": { "type": "number" },
+        "subtotalMinor": { "type": "number" },
+        "discountMinor": { "type": "number" },
+        "taxMinor": { "type": "number" },
+        "totalMinor": { "type": "number" },
+        "cogsMinor": { "type": "number" },
+        "amountTenderedMinor": { "type": "number" },
+        "changeMinor": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["cash", "mobile_money", "card", "bank_transfer", "split"] },
+        "paymentStatus": { "type": "string", "enum": ["paid", "partial", "refunded"] },
+        "saleStatus": { "type": "string", "enum": ["completed", "cancelled", "refunded", "partially_refunded"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["saleId", "transactionNumber", "idempotencyKey", "organizationId", "branchId", "cashierId", "subtotalMinor", "discountMinor", "taxMinor", "totalMinor", "paymentMethod", "paymentStatus", "saleStatus", "createdAt", "updatedAt"]
+    },
+    "SaleItem": {
+      "title": "SaleItem",
+      "description": "Line item inside /sales/{saleId}/items.",
+      "type": "object",
+      "properties": {
+        "itemId": { "type": "string", "maxLength": 128 },
+        "saleId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 180 },
+        "sku": { "type": "string", "maxLength": 64 },
+        "quantity": { "type": "number" },
+        "returnedQuantity": { "type": "number" },
+        "unitPriceMinor": { "type": "number" },
+        "costPriceMinor": { "type": "number" },
+        "discountMinor": { "type": "number" },
+        "taxMinor": { "type": "number" },
+        "lineTotalMinor": { "type": "number" }
+      },
+      "required": ["itemId", "saleId", "organizationId", "branchId", "productId", "productName", "quantity", "unitPriceMinor", "lineTotalMinor"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Payment breakdown record linked to a sale.",
+      "type": "object",
+      "properties": {
+        "paymentId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "saleId": { "type": "string", "maxLength": 128 },
+        "method": { "type": "string", "enum": ["cash", "mobile_money", "card", "bank_transfer"] },
+        "amountMinor": { "type": "number" },
+        "reference": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["settled", "manual_unintegrated", "refunded"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["paymentId", "organizationId", "branchId", "saleId", "method", "amountMinor", "status", "createdAt"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Customer profile for loyalty and purchase history.",
+      "type": "object",
+      "properties": {
+        "customerId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 160 },
+        "address": { "type": "string", "maxLength": 300 },
+        "totalPurchasesMinor": { "type": "number" },
+        "transactionCount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["customerId", "organizationId", "branchId", "fullName", "totalPurchasesMinor", "transactionCount", "createdAt", "updatedAt"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Vendor/supplier master record.",
+      "type": "object",
+      "properties": {
+        "supplierId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "contactPerson": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 160 },
+        "address": { "type": "string", "maxLength": 300 },
+        "taxId": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["supplierId", "organizationId", "name", "status", "createdAt", "updatedAt"]
+    },
+    "Purchase": {
+      "title": "Purchase",
+      "description": "Branch purchase order and supplier invoice record.",
+      "type": "object",
+      "properties": {
+        "purchaseId": { "type": "string", "maxLength": 128 },
+        "purchaseNumber": { "type": "string", "maxLength": 64 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "supplierId": { "type": "string", "maxLength": 128 },
+        "supplierName": { "type": "string", "maxLength": 160 },
+        "invoiceNumber": { "type": "string", "maxLength": 80 },
+        "subtotalMinor": { "type": "number" },
+        "discountMinor": { "type": "number" },
+        "taxMinor": { "type": "number" },
+        "totalMinor": { "type": "number" },
+        "paidMinor": { "type": "number" },
+        "status": { "type": "string", "enum": ["draft", "pending_approval", "approved", "received", "rejected"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "approvedBy": { "type": "string", "maxLength": 128 },
+        "receivedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["purchaseId", "purchaseNumber", "organizationId", "branchId", "supplierId", "totalMinor", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "PurchaseItem": {
+      "title": "PurchaseItem",
+      "description": "Line item inside /purchases/{purchaseId}/items.",
+      "type": "object",
+      "properties": {
+        "itemId": { "type": "string", "maxLength": 128 },
+        "purchaseId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 180 },
+        "quantity": { "type": "number" },
+        "unitCostMinor": { "type": "number" },
+        "discountMinor": { "type": "number" },
+        "taxMinor": { "type": "number" },
+        "lineTotalMinor": { "type": "number" }
+      },
+      "required": ["itemId", "purchaseId", "organizationId", "branchId", "productId", "quantity", "unitCostMinor", "lineTotalMinor"]
+    },
+    "StockTransfer": {
+      "title": "StockTransfer",
+      "description": "Inter-branch stock transfer workflow record.",
+      "type": "object",
+      "properties": {
+        "transferId": { "type": "string", "maxLength": 128 },
+        "transferNumber": { "type": "string", "maxLength": 64 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "sourceBranchId": { "type": "string", "maxLength": 128 },
+        "destinationBranchId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["draft", "pending_approval", "approved", "dispatched", "partially_received", "received", "rejected", "cancelled"] },
+        "notes": { "type": "string", "maxLength": 400 },
+        "requestedBy": { "type": "string", "maxLength": 128 },
+        "approvedBy": { "type": "string", "maxLength": 128 },
+        "dispatchedBy": { "type": "string", "maxLength": 128 },
+        "receivedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transferId", "transferNumber", "organizationId", "sourceBranchId", "destinationBranchId", "status", "requestedBy", "createdAt", "updatedAt"]
+    },
+    "TransferItem": {
+      "title": "TransferItem",
+      "description": "Line item inside /stockTransfers/{transferId}/items.",
+      "type": "object",
+      "properties": {
+        "itemId": { "type": "string", "maxLength": 128 },
+        "transferId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 180 },
+        "requestedQuantity": { "type": "number" },
+        "receivedQuantity": { "type": "number" },
+        "damagedQuantity": { "type": "number" }
+      },
+      "required": ["itemId", "transferId", "organizationId", "productId", "requestedQuantity"]
+    },
+    "Refund": {
+      "title": "Refund",
+      "description": "Customer return and refund request tied to a sale.",
+      "type": "object",
+      "properties": {
+        "refundId": { "type": "string", "maxLength": 128 },
+        "refundNumber": { "type": "string", "maxLength": 64 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "saleId": { "type": "string", "maxLength": 128 },
+        "transactionNumber": { "type": "string", "maxLength": 64 },
+        "reason": { "type": "string", "minLength": 2, "maxLength": 300 },
+        "refundTotalMinor": { "type": "number" },
+        "refundMethod": { "type": "string", "enum": ["cash", "mobile_money", "card", "bank_transfer"] },
+        "status": { "type": "string", "enum": ["pending", "approved", "processed", "rejected"] },
+        "requestedBy": { "type": "string", "maxLength": 128 },
+        "approvedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["refundId", "refundNumber", "organizationId", "branchId", "saleId", "reason", "refundTotalMinor", "status", "requestedBy", "createdAt", "updatedAt"]
+    },
+    "RefundItem": {
+      "title": "RefundItem",
+      "description": "Returned line item inside /refunds/{refundId}/items.",
+      "type": "object",
+      "properties": {
+        "itemId": { "type": "string", "maxLength": 128 },
+        "refundId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "saleItemId": { "type": "string", "maxLength": 128 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 180 },
+        "quantity": { "type": "number" },
+        "condition": { "type": "string", "enum": ["restock", "damaged"] },
+        "refundAmountMinor": { "type": "number" }
+      },
+      "required": ["itemId", "refundId", "organizationId", "branchId", "saleItemId", "productId", "quantity", "condition", "refundAmountMinor"]
+    },
+    "CashSession": {
+      "title": "CashSession",
+      "description": "Cash register shift session for a cashier in a branch.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "cashierId": { "type": "string", "maxLength": 128 },
+        "cashierName": { "type": "string", "maxLength": 160 },
+        "openingBalanceMinor": { "type": "number" },
+        "cashSalesMinor": { "type": "number" },
+        "cashRefundsMinor": { "type": "number" },
+        "cashDepositsMinor": { "type": "number" },
+        "cashWithdrawalsMinor": { "type": "number" },
+        "expectedClosingBalanceMinor": { "type": "number" },
+        "actualClosingBalanceMinor": { "type": "number" },
+        "differenceMinor": { "type": "number" },
+        "status": { "type": "string", "enum": ["open", "closed", "approved"] },
+        "approvedBy": { "type": "string", "maxLength": 128 },
+        "openedAt": { "type": "string", "format": "date-time" },
+        "closedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "organizationId", "branchId", "cashierId", "openingBalanceMinor", "cashSalesMinor", "cashRefundsMinor", "cashDepositsMinor", "cashWithdrawalsMinor", "expectedClosingBalanceMinor", "status", "openedAt", "updatedAt"]
+    },
+    "CashSessionTransaction": {
+      "title": "CashSessionTransaction",
+      "description": "Deposit, withdrawal, sale, or refund cash ledger entry inside /cashSessions/{sessionId}/transactions.",
+      "type": "object",
+      "properties": {
+        "transactionId": { "type": "string", "maxLength": 128 },
+        "sessionId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["sale", "refund", "deposit", "withdrawal"] },
+        "amountMinor": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 300 },
+        "referenceId": { "type": "string", "maxLength": 128 },
+        "performedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionId", "sessionId", "organizationId", "branchId", "type", "amountMinor", "performedBy", "createdAt"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Branch operating expense record.",
+      "type": "object",
+      "properties": {
+        "expenseId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "category": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "description": { "type": "string", "minLength": 2, "maxLength": 300 },
+        "amountMinor": { "type": "number" },
+        "expenseDate": { "type": "string", "maxLength": 32 },
+        "attachmentNote": { "type": "string", "maxLength": 300 },
+        "submittedBy": { "type": "string", "maxLength": 128 },
+        "approvalStatus": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "approvedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["expenseId", "organizationId", "branchId", "category", "description", "amountMinor", "expenseDate", "submittedBy", "approvalStatus", "createdAt", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable security and operational audit record.",
+      "type": "object",
+      "properties": {
+        "logId": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "userEmail": { "type": "string", "maxLength": 160 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "maxLength": 80 },
+        "resourceType": { "type": "string", "maxLength": 80 },
+        "resourceId": { "type": "string", "maxLength": 128 },
+        "requestId": { "type": "string", "maxLength": 128 },
+        "details": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["logId", "userId", "organizationId", "action", "resourceType", "resourceId", "createdAt"]
+    },
+    "BranchDailySummary": {
+      "title": "BranchDailySummary",
+      "description": "Aggregated daily branch financial and sales snapshot.",
+      "type": "object",
+      "properties": {
+        "summaryId": { "type": "string", "maxLength": 160 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "dateKey": { "type": "string", "maxLength": 16 },
+        "salesCount": { "type": "number" },
+        "revenueMinor": { "type": "number" },
+        "cogsMinor": { "type": "number" },
+        "discountsMinor": { "type": "number" },
+        "refundsMinor": { "type": "number" },
+        "expensesMinor": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["summaryId", "organizationId", "branchId", "dateKey", "salesCount", "revenueMinor", "cogsMinor", "updatedAt"]
+    },
+    "SystemSettings": {
+      "title": "SystemSettings",
+      "description": "Organization-wide POS, receipt, payment, discount, refund, and approval policy settings.",
+      "type": "object",
+      "properties": {
+        "settingId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "receiptHeader": { "type": "string", "maxLength": 300 },
+        "receiptFooter": { "type": "string", "maxLength": 300 },
+        "returnPolicy": { "type": "string", "maxLength": 400 },
+        "receiptVisibleFields": { "type": "array", "description": "Configured order receipt sections/records enabled for print and PDF output." },
+        "supportedPaymentMethods": { "type": "array" },
+        "maxCashierDiscountPct": { "type": "number" },
+        "expenseApprovalLimitMinor": { "type": "number" },
+        "refundWindowDays": { "type": "number" },
+        "lowStockNotificationsEnabled": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["settingId", "organizationId", "receiptHeader", "receiptFooter", "supportedPaymentMethods", "maxCashierDiscountPct", "expenseApprovalLimitMinor", "updatedAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Targeted branch/organization alert for low stock, approvals, and transfers.",
+      "type": "object",
+      "properties": {
+        "notificationId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["low_stock", "pending_approval", "stock_transfer", "purchase_completed", "refund_request", "cash_discrepancy", "invitation", "system_alert"] },
+        "title": { "type": "string", "maxLength": 140 },
+        "message": { "type": "string", "maxLength": 400 },
+        "readBy": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["notificationId", "organizationId", "type", "title", "message", "createdAt"]
+    },
+    "IdempotencyKey": {
+      "title": "IdempotencyKey",
+      "description": "Deduplication record ensuring duplicate sales or financial submissions cannot execute twice.",
+      "type": "object",
+      "properties": {
+        "keyId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 128 },
+        "resourceType": { "type": "string", "maxLength": 64 },
+        "resourceId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["keyId", "organizationId", "branchId", "resourceType", "resourceId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/organizations/{organizationId}": { "schema": { "$ref": "#/entities/Organization" }, "description": "Tenant organization profile and defaults." },
+    "/branches/{branchId}": { "schema": { "$ref": "#/entities/Branch" }, "description": "Retail branches owned by an organization." },
+    "/users/{userId}": { "schema": { "$ref": "#/entities/User" }, "description": "Staff accounts, role assignments, branch access, and permission overrides." },
+    "/roles/{roleId}": { "schema": { "$ref": "#/entities/Role" }, "description": "Dynamic RBAC roles and permission lists." },
+    "/permissions/{permissionId}": { "schema": { "$ref": "#/entities/PermissionDefinition" }, "description": "Configured permission catalog per organization." },
+    "/invitations/{invitationId}": { "schema": { "$ref": "#/entities/Invitation" }, "description": "Pending and accepted administrator-issued staff invitations." },
+    "/categories/{categoryId}": { "schema": { "$ref": "#/entities/Category" }, "description": "Product categories." },
+    "/products/{productId}": { "schema": { "$ref": "#/entities/Product" }, "description": "Centralized product catalog." },
+    "/branchInventory/{inventoryId}": { "schema": { "$ref": "#/entities/BranchInventory" }, "description": "Branch-specific product stock quantities and prices." },
+    "/stockMovements/{movementId}": { "schema": { "$ref": "#/entities/StockMovement" }, "description": "Immutable stock movement ledger." },
+    "/sales/{saleId}": { "schema": { "$ref": "#/entities/Sale" }, "description": "POS sale headers." },
+    "/sales/{saleId}/items/{itemId}": { "schema": { "$ref": "#/entities/SaleItem" }, "description": "POS sale line items." },
+    "/payments/{paymentId}": { "schema": { "$ref": "#/entities/Payment" }, "description": "Payment breakdown records." },
+    "/customers/{customerId}": { "schema": { "$ref": "#/entities/Customer" }, "description": "Organization and branch customer records." },
+    "/suppliers/{supplierId}": { "schema": { "$ref": "#/entities/Supplier" }, "description": "Organization suppliers." },
+    "/purchases/{purchaseId}": { "schema": { "$ref": "#/entities/Purchase" }, "description": "Branch purchase orders." },
+    "/purchases/{purchaseId}/items/{itemId}": { "schema": { "$ref": "#/entities/PurchaseItem" }, "description": "Purchase order line items." },
+    "/stockTransfers/{transferId}": { "schema": { "$ref": "#/entities/StockTransfer" }, "description": "Inter-branch stock transfers." },
+    "/stockTransfers/{transferId}/items/{itemId}": { "schema": { "$ref": "#/entities/TransferItem" }, "description": "Stock transfer line items." },
+    "/refunds/{refundId}": { "schema": { "$ref": "#/entities/Refund" }, "description": "Returns and refund requests." },
+    "/refunds/{refundId}/items/{itemId}": { "schema": { "$ref": "#/entities/RefundItem" }, "description": "Refund line items." },
+    "/cashSessions/{sessionId}": { "schema": { "$ref": "#/entities/CashSession" }, "description": "Cash register shift sessions." },
+    "/cashSessions/{sessionId}/transactions/{transactionId}": { "schema": { "$ref": "#/entities/CashSessionTransaction" }, "description": "Cash session movements." },
+    "/expenses/{expenseId}": { "schema": { "$ref": "#/entities/Expense" }, "description": "Branch expenses." },
+    "/auditLogs/{logId}": { "schema": { "$ref": "#/entities/AuditLog" }, "description": "Immutable audit logs." },
+    "/branchDailySummaries/{summaryId}": { "schema": { "$ref": "#/entities/BranchDailySummary" }, "description": "Daily branch summary rollups." },
+    "/systemSettings/{settingId}": { "schema": { "$ref": "#/entities/SystemSettings" }, "description": "Organization-wide system settings and receipt templates." },
+    "/notifications/{notificationId}": { "schema": { "$ref": "#/entities/Notification" }, "description": "Targeted branch/org alerts." },
+    "/idempotencyKeys/{keyId}": { "schema": { "$ref": "#/entities/IdempotencyKey" }, "description": "Financial transaction idempotency keys." }
+  }
+}
