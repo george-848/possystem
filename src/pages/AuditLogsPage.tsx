@@ -147,7 +147,7 @@ export default function AuditLogsPage() {
 
     downloadStructuredPdf({
       title: 'Security & Compliance Audit Report',
-      organizationName: organization?.businessName || 'LedgerBranch POS',
+      organizationName: organization?.businessName || 'Multi-Branch POS System',
       subtitle: buildFilterSummaryText(),
       filename,
       orientation: 'landscape',

@@ -364,7 +364,7 @@ export default function ReportsPage() {
       kind: 'report',
       title: dataset.title,
       subtitle: rangeSubtitle,
-      organizationName: organization?.businessName || 'LedgerBranch POS',
+      organizationName: organization?.businessName || 'Multi-Branch POS System',
       branchLabel,
       summaryItems,
       tableData: {

@@ -539,7 +539,7 @@ export function BarcodePrintTab() {
         document={{
           kind: 'barcode_labels',
           title: `Barcode Labels (${totalLabelCount})`,
-          organizationName: organization?.businessName || 'LedgerBranch POS',
+          organizationName: organization?.businessName || 'Multi-Branch POS System',
           barcodeData: {
             organization,
             items: queue,

@@ -88,7 +88,7 @@ export function BarcodeLabelsSheet({
   monochrome?: boolean;
 }) {
   const sym = organization?.currencySymbol || 'GH₵';
-  const businessName = organization?.businessName || 'LedgerBranch POS';
+  const businessName = organization?.businessName || 'Multi-Branch POS System';
   const labels = expandBarcodeLabels(items);
 
   if (labels.length === 0) {
@@ -161,7 +161,7 @@ export function downloadBarcodeLabelsPdf(params: {
   if (labels.length === 0) return;
 
   const sym = organization?.currencySymbol || 'GH₵';
-  const businessName = organization?.businessName || 'LedgerBranch POS';
+  const businessName = organization?.businessName || 'Multi-Branch POS System';
 
   if (config.layout === 'thermal_roll') {
     const labelW = 50;

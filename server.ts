@@ -36,7 +36,7 @@ async function startServer() {
     console.log(
       JSON.stringify({
         severity: 'INFO',
-        message: `LedgerBranch POS server listening on port ${port}`,
+        message: `Multi-Branch POS System server listening on port ${port}`,
         mode: isProd ? 'production' : 'development',
       })
     );

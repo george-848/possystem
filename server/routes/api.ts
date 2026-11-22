@@ -188,7 +188,7 @@ apiRouter.post(
         <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
           <h2 style="margin:0 0 12px;">You're invited to ${escapeHtml(organizationName)}</h2>
           <p>Hello ${escapeHtml(recipientName)},</p>
-          <p>An administrator has invited you to join <strong>${escapeHtml(organizationName)}</strong> on LedgerBranch POS.</p>
+          <p>An administrator has invited you to join <strong>${escapeHtml(organizationName)}</strong> on Multi-Branch POS System.</p>
           <p><strong>Role:</strong> ${escapeHtml(roleName)}<br/><strong>Branch Access:</strong> ${escapeHtml(branchSummary)}</p>
           <p style="margin:24px 0;">
             <a href="${escapeHtml(safeUrl)}" style="background:#059669;color:#ffffff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">
@@ -208,7 +208,7 @@ apiRouter.post(
         body: JSON.stringify({
           from: emailFrom,
           to: [recipientEmail],
-          subject: `Staff Invitation: Join ${organizationName} on LedgerBranch POS`,
+          subject: `Staff Invitation: Join ${organizationName} on Multi-Branch POS System`,
           html,
         }),
       });

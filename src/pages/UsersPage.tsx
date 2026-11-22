@@ -246,7 +246,7 @@ export default function UsersPage() {
   const copyCreatedCredentials = async () => {
     if (!createdCredentialsModal) return;
     const text =
-      `LedgerBranch POS Login Credentials\n` +
+      `Multi-Branch POS System Login Credentials\n` +
       `Staff Name: ${createdCredentialsModal.fullName}\n` +
       `Work Email: ${createdCredentialsModal.email}\n` +
       `Password: ${createdCredentialsModal.password}\n` +
@@ -295,11 +295,11 @@ export default function UsersPage() {
     branchSummary: string;
     inviteUrl: string;
   }) => {
-    const orgName = organization?.businessName || 'LedgerBranch POS';
-    const subject = encodeURIComponent(`Staff Invitation: Join ${orgName} on LedgerBranch POS`);
+    const orgName = organization?.businessName || 'Multi-Branch POS System';
+    const subject = encodeURIComponent(`Staff Invitation: Join ${orgName} on Multi-Branch POS System`);
     const body = encodeURIComponent(
       `Hello ${params.fullName},\n\n` +
-        `You have been invited to join ${orgName} on LedgerBranch POS.\n` +
+        `You have been invited to join ${orgName} on Multi-Branch POS System.\n` +
         `Role: ${params.roleName}\n` +
         `Branch Access: ${params.branchSummary}\n\n` +
         `Open this link and sign in with Google using your email (${params.email}) to activate your account:\n` +
@@ -336,7 +336,7 @@ export default function UsersPage() {
             invitationId: params.invitationId,
             recipientEmail: params.email,
             recipientName: params.fullName,
-            organizationName: organization?.businessName || 'LedgerBranch POS',
+            organizationName: organization?.businessName || 'Multi-Branch POS System',
             roleName: params.roleName,
             branchSummary: params.branchSummary,
             inviteUrl: params.inviteUrl,

@@ -418,7 +418,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         </div>
         <div className="min-w-0">
           <p className="text-sm font-bold text-slate-900 truncate font-display">
-            {organization?.businessName || 'LedgerBranch POS'}
+            {organization?.businessName || 'Multi-Branch POS System'}
           </p>
           <p className="text-xs text-slate-500 truncate">
             {userRole?.name || 'Enterprise Retail'}

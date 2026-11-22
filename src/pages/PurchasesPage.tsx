@@ -904,7 +904,7 @@ export default function PurchasesPage() {
                 kind: 'purchase_order',
                 title: `Purchase Order ${detailPo.purchaseNumber}`,
                 subtitle: `Supplier: ${detailPo.supplierName}${detailPo.invoiceNumber ? ` · Invoice: ${detailPo.invoiceNumber}` : ''} · Status: ${detailPo.status.replace('_', ' ').toUpperCase()}`,
-                organizationName: organization?.businessName || 'LedgerBranch POS',
+                organizationName: organization?.businessName || 'Multi-Branch POS System',
                 branchLabel: branchMap.get(detailPo.branchId) || detailPo.branchId,
                 summaryItems: [
                   { label: 'PO Number', value: detailPo.purchaseNumber },

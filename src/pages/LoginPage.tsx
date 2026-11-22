@@ -92,7 +92,7 @@ export function LoginPage() {
           </div>
           <div>
             <h1 className="text-lg font-bold text-slate-900 font-display">
-              LedgerBranch POS
+              Multi-Branch POS System
             </h1>
             <p className="text-xs text-slate-500">
               Enterprise Multi-Branch Retail & Inventory Platform
@@ -231,17 +231,9 @@ export function LoginPage() {
                 />
               </div>
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs font-medium text-slate-700">
-                    Password
-                  </label>
-                  <Link
-                    to="/forgot-password"
-                    className="text-xs text-emerald-700 hover:underline"
-                  >
-                    Forgot password?
-                  </Link>
-                </div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Password
+                </label>
                 <input
                   type="password"
                   required
@@ -250,6 +242,14 @@ export function LoginPage() {
                   placeholder="••••••••"
                   className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-emerald-600"
                 />
+                <div className="mt-1.5 flex justify-end">
+                  <Link
+                    to="/forgot-password"
+                    className="text-xs text-emerald-700 hover:underline"
+                  >
+                    Forgot password?
+                  </Link>
+                </div>
               </div>
               <button
                 type="submit"
