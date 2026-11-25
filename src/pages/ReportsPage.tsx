@@ -9,6 +9,7 @@ import {
   YAxis,
 } from 'recharts';
 import { Download, FileText, Printer } from 'lucide-react';
+import { FeatureGate } from '../components/FeatureGate';
 import { PrintOptionsModal, type PrintDocumentPayload } from '../components/PrintOptionsModal';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
@@ -707,8 +708,9 @@ export default function ReportsPage() {
 
       {/* TAB: MANAGEMENT */}
       {tab === 'management' && (
-        <div className="space-y-6">
-          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <FeatureGate feature="advanced_analytics">
+          <div className="space-y-6">
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
             <div className="px-5 py-3 border-b border-slate-200">
               <h3 className="text-sm font-semibold text-slate-900">Branch Performance Comparison</h3>
             </div>
@@ -792,7 +794,8 @@ export default function ReportsPage() {
               </div>
             </div>
           </div>
-        </div>
+          </div>
+        </FeatureGate>
       )}
       <PrintOptionsModal
         open={printOpen}

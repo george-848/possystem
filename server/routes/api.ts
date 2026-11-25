@@ -1,19 +1,32 @@
 import crypto from 'crypto';
 import { Router, type Response } from 'express';
 import { calculateOrderTotals } from '../../src/lib/money.ts';
-import { type AuthenticatedRequest, requireFirebaseAuth } from '../middleware/auth.ts';
+import {
+  type AuthenticatedRequest,
+  requireFeature,
+  requireFirebaseAuth,
+  requireTenantAccess,
+} from '../middleware/auth.ts';
+import { enforceQuotaServer } from '../services/entitlementServer.ts';
 import {
   CheckoutVerifySchema,
   CsvExportSchema,
   InvitationEmailSchema,
 } from '../validation/schemas.ts';
+import { billingRouter } from './billingApi.ts';
+import { platformAdminRouter } from './platformAdminApi.ts';
+import { saasRouter } from './saasApi.ts';
 
 export const apiRouter = Router();
+
+apiRouter.use(saasRouter);
+apiRouter.use(billingRouter);
+apiRouter.use(platformAdminRouter);
 
 apiRouter.get('/health', (req: AuthenticatedRequest, res: Response) => {
   res.json({
     status: 'ok',
-    service: 'ledgerbranch-pos-api',
+    service: 'multibranch-pos-saas-api',
     timestamp: new Date().toISOString(),
     requestId: req.requestId,
   });
@@ -27,50 +40,78 @@ apiRouter.post('/auth/verify', requireFirebaseAuth, (req: AuthenticatedRequest, 
   });
 });
 
-apiRouter.post('/pos/verify-checkout', requireFirebaseAuth, (req: AuthenticatedRequest, res: Response) => {
-  const parsed = CheckoutVerifySchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({
-      error: 'Invalid checkout payload.',
-      issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
-      requestId: req.requestId,
-    });
-    return;
-  }
+apiRouter.post(
+  '/pos/verify-checkout',
+  requireFirebaseAuth,
+  requireTenantAccess({ permission: 'sales.create', allowStarterFallback: true }),
+  requireFeature('basic_pos', { allowStarterFallback: true }),
+  (req: AuthenticatedRequest, res: Response) => {
+    const parsed = CheckoutVerifySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: 'Invalid checkout payload.',
+        issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+        requestId: req.requestId,
+      });
+      return;
+    }
 
-  const { items, orderDiscountMinor, defaultTaxRateBps, payments } = parsed.data;
-  const totals = calculateOrderTotals(items, orderDiscountMinor, defaultTaxRateBps);
-  const totalPaidMinor = payments.reduce((sum, p) => sum + p.amountMinor, 0);
+    const { organizationId, branchId, items, orderDiscountMinor, defaultTaxRateBps, payments } =
+      parsed.data;
 
-  if (totalPaidMinor < totals.totalMinor) {
-    res.status(422).json({
-      error: 'Total payment tendered is less than the calculated grand total.',
+    if (req.tenantContext) {
+      if (req.tenantContext.tenantId !== organizationId) {
+        res.status(403).json({
+          error: 'Cross-tenant POS checkout denied.',
+          requestId: req.requestId,
+        });
+        return;
+      }
+      if (
+        !req.tenantContext.isOrgSuperAdmin &&
+        !req.tenantContext.branchIds.includes(branchId)
+      ) {
+        res.status(403).json({
+          error: 'You are not assigned to this retail branch.',
+          requestId: req.requestId,
+        });
+        return;
+      }
+    }
+
+    const totals = calculateOrderTotals(items, orderDiscountMinor, defaultTaxRateBps);
+    const totalPaidMinor = payments.reduce((sum, p) => sum + p.amountMinor, 0);
+
+    if (totalPaidMinor < totals.totalMinor) {
+      res.status(422).json({
+        error: 'Total payment tendered is less than the calculated grand total.',
+        totals,
+        totalPaidMinor,
+        requestId: req.requestId,
+      });
+      return;
+    }
+
+    const now = new Date();
+    const datePart = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
+      now.getDate()
+    ).padStart(2, '0')}`;
+    const randomSuffix = crypto.randomBytes(3).toString('hex').toUpperCase();
+    const transactionNumber = `TXN-${datePart}-${randomSuffix}`;
+    const changeMinor = Math.max(0, totalPaidMinor - totals.totalMinor);
+
+    res.json({
+      verified: true,
+      transactionNumber,
       totals,
       totalPaidMinor,
+      changeMinor,
+      paymentIntegrationNote:
+        'Cash payments settle immediately; Mobile Money, Card, and Bank Transfer are recorded as manual confirmation.',
       requestId: req.requestId,
     });
-    return;
   }
-
-  const now = new Date();
-  const datePart = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
-    now.getDate()
-  ).padStart(2, '0')}`;
-  const randomSuffix = crypto.randomBytes(3).toString('hex').toUpperCase();
-  const transactionNumber = `TXN-${datePart}-${randomSuffix}`;
-  const changeMinor = Math.max(0, totalPaidMinor - totals.totalMinor);
-
-  res.json({
-    verified: true,
-    transactionNumber,
-    totals,
-    totalPaidMinor,
-    changeMinor,
-    paymentIntegrationNote:
-      'Cash payments settle immediately; Mobile Money, Card, and Bank Transfer are recorded as manual confirmation (external payment gateway not yet integrated).',
-    requestId: req.requestId,
-  });
-});
+);
 
 function sanitizeCsvCell(value: string | number | boolean | null): string {
   if (value === null || value === undefined) return '';
@@ -84,43 +125,47 @@ function sanitizeCsvCell(value: string | number | boolean | null): string {
   return str;
 }
 
-apiRouter.post('/reports/export-csv', requireFirebaseAuth, (req: AuthenticatedRequest, res: Response) => {
-  const parsed = CsvExportSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({
-      error: 'Invalid export dataset.',
-      requestId: req.requestId,
-    });
-    return;
+apiRouter.post(
+  '/reports/export-csv',
+  requireFirebaseAuth,
+  requireTenantAccess({ allowStarterFallback: true }),
+  requireFeature('basic_reports', { allowStarterFallback: true }),
+  (req: AuthenticatedRequest, res: Response) => {
+    const parsed = CsvExportSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: 'Invalid export dataset.',
+        requestId: req.requestId,
+      });
+      return;
+    }
+
+    const { filename, headers, rows } = parsed.data;
+    const lines = [
+      headers.map(sanitizeCsvCell).join(','),
+      ...rows.map((row) => row.map(sanitizeCsvCell).join(',')),
+    ];
+    const csv = lines.join('\r\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
+    res.send(csv);
   }
-
-  const { filename, headers, rows } = parsed.data;
-  const lines = [
-    headers.map(sanitizeCsvCell).join(','),
-    ...rows.map((row) => row.map(sanitizeCsvCell).join(',')),
-  ];
-  const csv = lines.join('\r\n');
-
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
-  res.send(csv);
-});
+);
 
 apiRouter.get('/system/architecture', requireFirebaseAuth, (req: AuthenticatedRequest, res: Response) => {
   res.json({
     requestId: req.requestId,
     architecture: {
-      database: 'Cloud Firestore (Starter Tier — client SDK + hardened firestore.rules)',
-      authentication: 'Firebase Authentication (Email-verified identity tokens + Express verifyIdToken)',
+      database: 'Cloud Firestore (Multi-Tenant SaaS Isolation + Hardened firestore.rules)',
+      authentication: 'Firebase Authentication (Verified identity tokens + Express RBAC/Tenant Middleware)',
       monetaryModel: 'Integer minor currency units (GHS / GH₵ pesewas)',
       stages: [
-        { stage: 1, name: 'Foundation, Auth, Organization, Branches, Dynamic RBAC', status: 'completed' },
-        { stage: 2, name: 'Role-Adaptive Dashboards, Users, Roles, Permission Matrix, Audit Logs', status: 'completed' },
-        { stage: 3, name: 'Products, Categories, Branch Inventory, Stock Movements, Low-Stock Alerts', status: 'completed' },
-        { stage: 4, name: 'POS Terminal, Barcode, Split Payments, Receipts, Cash Sessions, Refunds', status: 'completed' },
-        { stage: 5, name: 'Suppliers, Purchases, Goods Receiving, Stock Transfers, Expenses', status: 'completed' },
-        { stage: 6, name: 'Reports, Analytics, CSV/PDF Export, Notifications, Financial Summaries', status: 'completed' },
-        { stage: 7, name: 'Automated Tests, Security Rules Audit, Cloud Run Deployment Config', status: 'completed' },
+        { stage: 1, name: 'Multi-Tenant Schema, Firestore Security Rules & Entitlement Engine', status: 'completed' },
+        { stage: 2, name: 'Backend Tenant Verification, Feature Enforcement & POS Terminals', status: 'completed' },
+        { stage: 3, name: 'Self-Service Tenant Onboarding & UI Entitlement Gating', status: 'completed' },
+        { stage: 4, name: 'Paystack & Ghanaian Mobile Money Subscription Billing', status: 'completed' },
+        { stage: 5, name: 'Platform Super Admin Dashboard & Dedicated Deployment Config', status: 'completed' },
       ],
     },
   });
@@ -138,6 +183,7 @@ function escapeHtml(value: string): string {
 apiRouter.post(
   '/invitations/send-email',
   requireFirebaseAuth,
+  requireTenantAccess({ permission: 'users.create', allowStarterFallback: true }),
   async (req: AuthenticatedRequest, res: Response) => {
     const parsed = InvitationEmailSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -146,6 +192,22 @@ apiRouter.post(
         requestId: req.requestId,
       });
       return;
+    }
+
+    if (req.tenantContext) {
+      try {
+        const quota = await enforceQuotaServer(req.tenantContext.tenantId, 'staff', 1);
+        if (!quota.allowed) {
+          res.status(quota.statusCode).json({
+            error: quota.reason,
+            code: 'quota_limit_reached',
+            requestId: req.requestId,
+          });
+          return;
+        }
+      } catch {
+        // Starter fallback skips server quota check if Admin Firestore IAM is disabled
+      }
     }
 
     const {
@@ -237,4 +299,3 @@ apiRouter.post(
     }
   }
 );
-

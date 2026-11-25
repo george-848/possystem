@@ -7,11 +7,14 @@ import React, {
   useState,
 } from 'react';
 import {
+  createUserWithEmailAndPassword,
+  GoogleAuthProvider,
   onAuthStateChanged,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
   signOut,
+  updateProfile,
   type User as FirebaseUser,
 } from 'firebase/auth';
 import {
@@ -24,10 +27,14 @@ import {
 } from 'firebase/firestore';
 import {
   auth,
+  authorizeGmailAccess,
   db,
+  getGmailAccessToken,
   googleProvider,
   handleFirestoreError,
   OperationType,
+  setGmailAccessToken,
+  subscribeGmailToken,
 } from '../lib/firebase';
 import {
   canAccessBranch as checkBranchAccess,
@@ -70,8 +77,12 @@ interface AuthContextValue {
   canAccessBranch: (branchId: string) => boolean;
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
+  signUpWithEmail: (email: string, password: string, fullName: string) => Promise<void>;
   requestPasswordReset: (email: string) => Promise<void>;
   acceptPendingInvitation: () => Promise<void>;
+  gmailConnected: boolean;
+  connectGmail: () => Promise<string>;
+  getGmailToken: () => string | null;
   logout: () => Promise<void>;
 }
 
@@ -92,6 +103,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [pendingInvitation, setPendingInvitation] = useState<Invitation | null>(null);
   const [needsOrgSetup, setNeedsOrgSetup] = useState(false);
   const [loginLoggedUid, setLoginLoggedUid] = useState<string | null>(null);
+  const [gmailConnected, setGmailConnected] = useState(false);
+
+  useEffect(() => {
+    return subscribeGmailToken(setGmailConnected);
+  }, []);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
@@ -162,6 +178,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             }
           }
 
+          setPendingInvitation(null);
           if (emailLower === BOOTSTRAP_EMAIL) {
             setNeedsOrgSetup(true);
           } else {
@@ -302,12 +319,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const signInWithGoogle = useCallback(async () => {
-    await signInWithPopup(auth, googleProvider);
+    const result = await signInWithPopup(auth, googleProvider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    if (credential?.accessToken) {
+      setGmailAccessToken(credential.accessToken);
+    }
   }, []);
 
   const signInWithEmail = useCallback(async (email: string, password: string) => {
     await signInWithEmailAndPassword(auth, email.trim(), password);
   }, []);
+
+  const signUpWithEmail = useCallback(
+    async (email: string, password: string, fullName: string) => {
+      const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+      if (fullName.trim()) {
+        await updateProfile(cred.user, { displayName: fullName.trim() });
+      }
+    },
+    []
+  );
 
   const requestPasswordReset = useCallback(async (email: string) => {
     await sendPasswordResetEmail(auth, email.trim());
@@ -318,7 +349,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await claimInvitationForCurrentUser(pendingInvitation);
   }, [pendingInvitation]);
 
+  const connectGmail = useCallback(async () => {
+    return authorizeGmailAccess();
+  }, []);
+
+  const getGmailToken = useCallback(() => {
+    return getGmailAccessToken();
+  }, []);
+
   const logout = useCallback(async () => {
+    setGmailAccessToken(null);
     await signOut(auth);
   }, []);
 
@@ -351,8 +391,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         canAccessBranch,
         signInWithGoogle,
         signInWithEmail,
+        signUpWithEmail,
         requestPasswordReset,
         acceptPendingInvitation,
+        gmailConnected,
+        connectGmail,
+        getGmailToken,
         logout,
       }}
     >

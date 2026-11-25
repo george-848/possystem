@@ -16,11 +16,14 @@ import {
   XCircle,
 } from 'lucide-react';
 import { ConfirmDialog } from '../components/ConfirmDialog';
+import { QuotaStatusBar } from '../components/FeatureGate';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
+import { useEntitlements } from '../contexts/EntitlementContext';
 import { useToast } from '../contexts/ToastContext';
 import { formatDateTime } from '../lib/money';
-import { apiRequest } from '../services/auditService';
+import { sendInvitationViaGmail } from '../lib/gmail';
+import { recordAuditLog } from '../services/auditService';
 import {
   createInvitation,
   createStaffUserManually,
@@ -65,13 +68,24 @@ function generateTemporaryPassword(length = 12): string {
 }
 
 export default function UsersPage() {
-  const { organization, branches, userProfile, hasPermission } = useAuth();
+  const {
+    firebaseUser,
+    organization,
+    branches,
+    userProfile,
+    hasPermission,
+    gmailConnected,
+    connectGmail,
+    getGmailToken,
+  } = useAuth();
   const { users, invitations, roles } = useData();
+  const { checkQuota } = useEntitlements();
   const { notify } = useToast();
 
   const canCreate = hasPermission('users.create');
   const canEdit = hasPermission('users.edit');
   const canSuspend = hasPermission('users.suspend');
+  const staffQuotaAllowed = checkQuota('staff', 1).allowed;
 
   const [search, setSearch] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
@@ -79,6 +93,7 @@ export default function UsersPage() {
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [confirmSuspendUser, setConfirmSuspendUser] = useState<UserProfile | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [sendingGmail, setSendingGmail] = useState(false);
   const [resettingPassword, setResettingPassword] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -99,8 +114,15 @@ export default function UsersPage() {
     roleName: string;
     branchSummary: string;
     inviteUrl: string;
-    emailed: boolean;
-    reason?: string;
+  } | null>(null);
+
+  const [confirmGmailInvite, setConfirmGmailInvite] = useState<{
+    invitationId: string;
+    fullName: string;
+    email: string;
+    roleName: string;
+    branchSummary: string;
+    inviteUrl: string;
   } | null>(null);
 
   // Manual user creation form state
@@ -319,35 +341,53 @@ export default function UsersPage() {
     }
   };
 
-  const trySendInviteEmail = async (params: {
+  const requestSendViaGmail = (payload: {
     invitationId: string;
     email: string;
     fullName: string;
     roleName: string;
     branchSummary: string;
     inviteUrl: string;
-  }): Promise<{ emailed: boolean; reason?: string }> => {
+  }) => {
+    setConfirmGmailInvite(payload);
+  };
+
+  const handleConfirmSendViaGmail = async () => {
+    if (!confirmGmailInvite || !organization) return;
+    setSendingGmail(true);
     try {
-      return await apiRequest<{ emailed: boolean; reason?: string }>(
-        '/api/invitations/send-email',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            invitationId: params.invitationId,
-            recipientEmail: params.email,
-            recipientName: params.fullName,
-            organizationName: organization?.businessName || 'Multi-Branch POS System',
-            roleName: params.roleName,
-            branchSummary: params.branchSummary,
-            inviteUrl: params.inviteUrl,
-          }),
-        }
+      const accessToken = getGmailToken() || (await connectGmail());
+      await sendInvitationViaGmail({
+        accessToken,
+        recipientEmail: confirmGmailInvite.email,
+        recipientName: confirmGmailInvite.fullName,
+        organizationName: organization.businessName || 'Multi-Branch POS System',
+        roleName: confirmGmailInvite.roleName,
+        branchSummary: confirmGmailInvite.branchSummary,
+        inviteUrl: confirmGmailInvite.inviteUrl,
+      });
+      await recordAuditLog({
+        organizationId: organization.organizationId,
+        action: 'user.invitation_emailed',
+        resourceType: 'invitation',
+        resourceId: confirmGmailInvite.invitationId,
+        details: `Sent invitation email via Gmail to ${confirmGmailInvite.email}`,
+      });
+      notify(
+        'success',
+        'Invitation Sent via Gmail',
+        `Email sent directly from your Gmail account to ${confirmGmailInvite.email}.`
       );
+      setConfirmGmailInvite(null);
+      setShareModal(null);
     } catch (err) {
-      return {
-        emailed: false,
-        reason: err instanceof Error ? err.message : 'Unable to send email automatically.',
-      };
+      notify(
+        'error',
+        'Gmail Send Failed',
+        err instanceof Error ? err.message : 'Unable to send invitation through Gmail.'
+      );
+    } finally {
+      setSendingGmail(false);
     }
   };
 
@@ -379,34 +419,16 @@ export default function UsersPage() {
       const branchSummary = invBranchIds.map((id) => branchMap.get(id) || id).join(', ');
       const inviteUrl = buildInviteUrl(invitationId, cleanEmail);
 
-      const emailResult = await trySendInviteEmail({
+      setInviteOpen(false);
+      setShareModal({
         invitationId,
-        email: cleanEmail,
         fullName: invFullName.trim(),
+        email: cleanEmail,
         roleName,
         branchSummary,
         inviteUrl,
       });
-
-      setInviteOpen(false);
-      if (emailResult.emailed) {
-        notify(
-          'success',
-          'Invitation Email Sent',
-          `An onboarding email was sent to ${cleanEmail}.`
-        );
-      } else {
-        setShareModal({
-          invitationId,
-          fullName: invFullName.trim(),
-          email: cleanEmail,
-          roleName,
-          branchSummary,
-          inviteUrl,
-          emailed: false,
-          reason: emailResult.reason,
-        });
-      }
+      notify('success', 'Invite Link Created', `Onboarding link ready for ${cleanEmail}.`);
     } catch (err) {
       notify('error', 'Invite Failed', err instanceof Error ? err.message : 'Unable to create invite.');
     } finally {
@@ -414,37 +436,18 @@ export default function UsersPage() {
     }
   };
 
-  const handleResendOrShare = async (inv: Invitation) => {
+  const handleResendOrShare = (inv: Invitation) => {
     const roleName = roleMap.get(inv.roleId) || inv.roleId;
     const branchSummary = inv.branchIds.map((id) => branchMap.get(id) || id).join(', ');
     const inviteUrl = buildInviteUrl(inv.invitationId, inv.email);
-    setSubmitting(true);
-    try {
-      const emailResult = await trySendInviteEmail({
-        invitationId: inv.invitationId,
-        email: inv.email,
-        fullName: inv.fullName,
-        roleName,
-        branchSummary,
-        inviteUrl,
-      });
-      if (emailResult.emailed) {
-        notify('success', 'Invitation Email Sent', `Email delivered to ${inv.email}.`);
-      } else {
-        setShareModal({
-          invitationId: inv.invitationId,
-          fullName: inv.fullName,
-          email: inv.email,
-          roleName,
-          branchSummary,
-          inviteUrl,
-          emailed: false,
-          reason: emailResult.reason,
-        });
-      }
-    } finally {
-      setSubmitting(false);
-    }
+    setShareModal({
+      invitationId: inv.invitationId,
+      fullName: inv.fullName,
+      email: inv.email,
+      roleName,
+      branchSummary,
+      inviteUrl,
+    });
   };
 
   const openEditUser = (u: UserProfile) => {
@@ -553,16 +556,18 @@ export default function UsersPage() {
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               type="button"
+              disabled={!staffQuotaAllowed}
               onClick={openCreateModal}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold whitespace-nowrap shrink-0"
             >
               <UserPlus className="w-4 h-4" />
               Create Staff User
             </button>
             <button
               type="button"
+              disabled={!staffQuotaAllowed}
               onClick={openInviteModal}
-              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 text-sm font-medium whitespace-nowrap shrink-0"
             >
               <MailPlus className="w-4 h-4 text-slate-500" />
               Google Invite Link
@@ -570,6 +575,8 @@ export default function UsersPage() {
           </div>
         )}
       </div>
+
+      <QuotaStatusBar resource="staff" label="Staff Accounts" />
 
       {/* Pending Google Invite Links (if any exist) */}
       {pendingInvites.length > 0 && (
@@ -618,11 +625,26 @@ export default function UsersPage() {
                       </button>
                       <button
                         type="button"
-                        disabled={submitting}
-                        onClick={() => void handleResendOrShare(inv)}
+                        onClick={() =>
+                          requestSendViaGmail({
+                            invitationId: inv.invitationId,
+                            email: inv.email,
+                            fullName: inv.fullName,
+                            roleName: roleMap.get(inv.roleId) || inv.roleId,
+                            branchSummary: inv.branchIds.map((id) => branchMap.get(id) || id).join(', '),
+                            inviteUrl,
+                          })
+                        }
                         className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 text-xs font-medium text-emerald-700 hover:bg-emerald-100"
                       >
-                        <Send className="w-3.5 h-3.5" /> Share
+                        <Send className="w-3.5 h-3.5" /> Send via Gmail
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleResendOrShare(inv)}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        <Mail className="w-3.5 h-3.5" /> Share
                       </button>
                       <button
                         type="button"
@@ -1291,9 +1313,17 @@ export default function UsersPage() {
             </div>
 
             <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => requestSendViaGmail(shareModal)}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold"
+              >
+                <Send className="w-4 h-4" />
+                {gmailConnected ? 'Send via Gmail' : 'Connect & Send via Gmail'}
+              </button>
               <a
                 href={buildMailtoHref(shareModal)}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 text-sm font-medium"
               >
                 <Mail className="w-4 h-4" />
                 Open Email Draft
@@ -1309,6 +1339,24 @@ export default function UsersPage() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={Boolean(confirmGmailInvite)}
+        title="Send Invitation Email via Gmail?"
+        description={
+          confirmGmailInvite
+            ? `Send an onboarding invitation email from ${firebaseUser?.email || 'your Google account'} to ${confirmGmailInvite.fullName} (${confirmGmailInvite.email}) for role "${confirmGmailInvite.roleName}" (${confirmGmailInvite.branchSummary})?`
+            : ''
+        }
+        confirmLabel={
+          gmailConnected ? 'Send Email via Gmail' : 'Authorize Gmail & Send'
+        }
+        loading={sendingGmail}
+        onConfirm={() => void handleConfirmSendViaGmail()}
+        onCancel={() => {
+          if (!sendingGmail) setConfirmGmailInvite(null);
+        }}
+      />
 
       <ConfirmDialog
         open={Boolean(confirmSuspendUser)}

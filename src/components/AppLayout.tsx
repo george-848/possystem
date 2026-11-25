@@ -9,15 +9,19 @@ import {
   Building2,
   ClipboardList,
   CreditCard,
+  Crown,
   FileSpreadsheet,
   LayoutDashboard,
+  Lock,
   LogOut,
   Menu,
   Package,
+  PlusCircle,
   ReceiptText,
   RotateCcw,
   Search,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   ShoppingCart,
   Store,
@@ -30,7 +34,9 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
+import { useEntitlements } from '../contexts/EntitlementContext';
 import { useToast } from '../contexts/ToastContext';
+import { ROUTE_FEATURE_REQUIREMENTS } from '../lib/entitlements';
 import { formatDateTime, formatMoney } from '../lib/money';
 import { markNotificationRead } from '../services/auditService';
 
@@ -239,6 +245,16 @@ const NAV_ITEMS: NavItem[] = [
     iconActiveClass: 'bg-slate-800 text-white shadow-xs',
     rowActiveClass: 'bg-slate-100 text-slate-950 font-semibold',
   },
+  {
+    to: '/billing',
+    label: 'Plan & Billing',
+    icon: Crown,
+    permission: 'settings.view',
+    section: 'Administration',
+    iconIdleClass: 'bg-emerald-50 text-emerald-700',
+    iconActiveClass: 'bg-emerald-700 text-white shadow-xs',
+    rowActiveClass: 'bg-emerald-50/90 text-emerald-950 font-semibold',
+  },
 ];
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
@@ -262,6 +278,14 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     suppliers,
     users,
   } = useData();
+  const {
+    entitlements,
+    memberships,
+    isPlatformAdmin,
+    deploymentMode,
+    hasFeature,
+    switchTenant,
+  } = useEntitlements();
   const { notify } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
@@ -270,11 +294,24 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const [notifOpen, setNotifOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
+  const [switchingTenant, setSwitchingTenant] = useState(false);
 
-  const visibleNavItems = useMemo(
-    () => NAV_ITEMS.filter((item) => hasPermission(item.permission)),
-    [hasPermission]
-  );
+  const visibleNavItems = useMemo(() => {
+    const base = NAV_ITEMS.filter((item) => hasPermission(item.permission));
+    if (isPlatformAdmin) {
+      base.push({
+        to: '/platform-admin',
+        label: 'Platform Super Admin',
+        icon: ShieldAlert,
+        permission: 'dashboard.view',
+        section: 'Platform Owner',
+        iconIdleClass: 'bg-slate-900 text-amber-400',
+        iconActiveClass: 'bg-slate-900 text-white shadow-xs',
+        rowActiveClass: 'bg-slate-900 text-white font-semibold',
+      });
+    }
+    return base;
+  }, [hasPermission, isPlatformAdmin]);
 
   const sections = useMemo(() => {
     const map = new Map<string, NavItem[]>();
@@ -398,7 +435,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   }, [searchTerm, categories, products, sales, customers, suppliers, users, authorizedBranches, organization]);
 
   const currentPageLabel =
-    NAV_ITEMS.find((i) => location.pathname.startsWith(i.to))?.label || 'Workspace';
+    visibleNavItems.find((i) => location.pathname.startsWith(i.to))?.label || 'Workspace';
 
   const handleBranchSwitch = async (nextBranchId: string) => {
     try {
@@ -410,20 +447,76 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const handleTenantSwitch = async (nextTenantId: string) => {
+    if (!nextTenantId || nextTenantId === organization?.organizationId) return;
+    setSwitchingTenant(true);
+    try {
+      await switchTenant(nextTenantId);
+      notify('info', 'Business Workspace Switched', 'Reloading tenant data and entitlements...');
+    } catch (err) {
+      notify('error', 'Switch Failed', err instanceof Error ? err.message : 'Unable to switch business.');
+    } finally {
+      setSwitchingTenant(false);
+    }
+  };
+
   const sidebarContent = (
     <div className="flex flex-col h-full bg-white border-r border-slate-200 w-64">
-      <div className="h-16 px-5 flex items-center gap-3 border-b border-slate-200 shrink-0">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white shrink-0 shadow-xs">
-          <Building2 className="w-4 h-4" />
+      <div className="px-4 py-3.5 border-b border-slate-200 shrink-0 space-y-2.5">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white shrink-0 shadow-xs">
+            <Building2 className="w-4 h-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold text-slate-900 truncate font-display">
+              {organization?.businessName || 'Multi-Branch POS System'}
+            </p>
+            <p className="text-[11px] text-slate-500 truncate flex items-center gap-1.5">
+              <span>{userRole?.name || 'Retail Operations'}</span>
+              {entitlements && (
+                <span className="font-mono text-emerald-700 font-semibold">
+                  · {entitlements.plan.name}
+                </span>
+              )}
+            </p>
+          </div>
         </div>
-        <div className="min-w-0">
-          <p className="text-sm font-bold text-slate-900 truncate font-display">
-            {organization?.businessName || 'Multi-Branch POS System'}
-          </p>
-          <p className="text-xs text-slate-500 truncate">
-            {userRole?.name || 'Enterprise Retail'}
-          </p>
-        </div>
+
+        {(memberships.length > 1 || deploymentMode === 'shared') && (
+          <div className="flex items-center gap-1.5">
+            {memberships.length > 1 && (
+              <select
+                aria-label="Switch Business Workspace"
+                disabled={switchingTenant}
+                value={organization?.organizationId || ''}
+                onChange={(e) => void handleTenantSwitch(e.target.value)}
+                className="flex-1 min-w-0 px-2 py-1 text-xs font-medium bg-slate-50 border border-slate-200 rounded-md text-slate-700 truncate"
+              >
+                {memberships.map((m) => (
+                  <option key={m.membershipId} value={m.tenantId}>
+                    {m.tenantId === organization?.organizationId
+                      ? organization.businessName
+                      : m.tenantId}
+                  </option>
+                ))}
+              </select>
+            )}
+            {deploymentMode === 'shared' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  navigate('/setup');
+                }}
+                title="Register another retail business"
+                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md shrink-0"
+              >
+                <PlusCircle className="w-3 h-3" />
+                {memberships.length <= 1 ? 'New Business' : 'Add'}
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5">
@@ -435,6 +528,8 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
             <div className="space-y-1">
               {items.map((item) => {
                 const Icon = item.icon;
+                const reqFeature = ROUTE_FEATURE_REQUIREMENTS[item.to];
+                const isLocked = Boolean(reqFeature && !hasFeature(reqFeature));
                 return (
                   <NavLink
                     key={item.to}
@@ -457,7 +552,10 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                         >
                           <Icon className="w-4 h-4 shrink-0" />
                         </span>
-                        <span className="truncate">{item.label}</span>
+                        <span className="truncate flex-1">{item.label}</span>
+                        {isLocked && (
+                          <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                        )}
                       </>
                     )}
                   </NavLink>
@@ -658,6 +756,37 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
             </div>
           </div>
         </header>
+
+        {entitlements &&
+          (!entitlements.isOperational ||
+            entitlements.effectiveStatus === 'grace_period' ||
+            (entitlements.effectiveStatus === 'trial' &&
+              entitlements.daysRemaining !== null &&
+              entitlements.daysRemaining <= 7)) && (
+            <div
+              className={`no-print px-4 lg:px-6 py-2.5 border-b text-xs flex flex-wrap items-center justify-between gap-2 ${
+                !entitlements.isOperational
+                  ? 'bg-rose-50 border-rose-200 text-rose-900'
+                  : entitlements.effectiveStatus === 'grace_period'
+                    ? 'bg-amber-50 border-amber-200 text-amber-950'
+                    : 'bg-emerald-50 border-emerald-200 text-emerald-950'
+              }`}
+            >
+              <p className="font-medium">
+                {!entitlements.isOperational
+                  ? entitlements.blockingReason || 'Subscription is inactive. Renew to restore POS writes.'
+                  : entitlements.effectiveStatus === 'grace_period'
+                    ? `Payment grace period active (${entitlements.graceDaysRemaining ?? 0} day(s) left before lockout).`
+                    : `${entitlements.plan.name} trial: ${entitlements.daysRemaining ?? 0} day(s) remaining.`}
+              </p>
+              <NavLink
+                to="/billing"
+                className="font-semibold underline underline-offset-2 shrink-0"
+              >
+                Manage Plan &amp; Billing →
+              </NavLink>
+            </div>
+          )}
 
         <main className="flex-1 p-4 lg:p-6 max-w-[1600px] w-full mx-auto">
           <motion.div

@@ -4,23 +4,123 @@ import {
   deleteUser,
   getAuth,
   GoogleAuthProvider,
+  linkWithPopup,
+  onAuthStateChanged,
+  reauthenticateWithPopup,
   sendEmailVerification,
+  signInWithPopup,
   signOut,
   updateProfile,
 } from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
+export const WORKSPACE_SCOPES = [
+  'https://www.googleapis.com/auth/gmail.send',
+] as const;
+
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 const provisionerApp =
   getApps().find((a) => a.name === 'staff_provisioner') ||
   initializeApp(firebaseConfig, 'staff_provisioner');
 
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+const configuredFirestoreDatabaseId =
+  (firebaseConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId?.trim() ||
+  'ai-studio-c407e108-91a5-4af6-afa9-6e7048272a3f';
+
+export const db = getFirestore(app, configuredFirestoreDatabaseId);
 export const auth = getAuth(app);
 const provisionerAuth = getAuth(provisionerApp);
 export const googleProvider = new GoogleAuthProvider();
+for (const scope of WORKSPACE_SCOPES) {
+  googleProvider.addScope(scope);
+}
 googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+// In-memory cache only (never persisted to localStorage or sessionStorage)
+let cachedGmailAccessToken: string | null = null;
+const gmailTokenListeners = new Set<(connected: boolean) => void>();
+
+function notifyGmailTokenListeners() {
+  const connected = Boolean(cachedGmailAccessToken);
+  for (const listener of gmailTokenListeners) {
+    listener(connected);
+  }
+}
+
+export function getGmailAccessToken(): string | null {
+  return cachedGmailAccessToken;
+}
+
+export function setGmailAccessToken(token: string | null): void {
+  cachedGmailAccessToken = token && token.trim() ? token.trim() : null;
+  notifyGmailTokenListeners();
+}
+
+export function subscribeGmailToken(listener: (connected: boolean) => void): () => void {
+  gmailTokenListeners.add(listener);
+  listener(Boolean(cachedGmailAccessToken));
+  return () => {
+    gmailTokenListeners.delete(listener);
+  };
+}
+
+onAuthStateChanged(auth, (user) => {
+  if (!user) {
+    setGmailAccessToken(null);
+  }
+});
+
+export async function authorizeGmailAccess(): Promise<string> {
+  if (cachedGmailAccessToken) {
+    return cachedGmailAccessToken;
+  }
+
+  const gmailProvider = new GoogleAuthProvider();
+  for (const scope of WORKSPACE_SCOPES) {
+    gmailProvider.addScope(scope);
+  }
+  const customParams: Record<string, string> = { prompt: 'consent' };
+  if (auth.currentUser?.email) {
+    customParams.login_hint = auth.currentUser.email;
+  }
+  gmailProvider.setCustomParameters(customParams);
+
+  let result;
+  if (auth.currentUser) {
+    const hasGoogleLinked = auth.currentUser.providerData.some(
+      (p) => p.providerId === 'google.com'
+    );
+    if (hasGoogleLinked) {
+      result = await reauthenticateWithPopup(auth.currentUser, gmailProvider);
+    } else {
+      try {
+        result = await linkWithPopup(auth.currentUser, gmailProvider);
+      } catch (err) {
+        const code =
+          typeof err === 'object' && err !== null && 'code' in err
+            ? String((err as { code?: unknown }).code)
+            : '';
+        if (code === 'auth/credential-already-in-use') {
+          throw new Error(
+            'That Google account belongs to a different user. Sign out and use Sign in with Google on that account to send via Gmail.'
+          );
+        }
+        throw err;
+      }
+    }
+  } else {
+    result = await signInWithPopup(auth, gmailProvider);
+  }
+
+  const credential = GoogleAuthProvider.credentialFromResult(result);
+  if (!credential?.accessToken) {
+    throw new Error('Google did not return Gmail sending permission. Please try again and grant Gmail access.');
+  }
+
+  setGmailAccessToken(credential.accessToken);
+  return credential.accessToken;
+}
 
 function mapAuthProvisionError(error: unknown): Error {
   const code =

@@ -16,6 +16,7 @@ import type {
   TransferItem,
 } from '../types/pos';
 import { cleanOptional, createNotification, makeId, recordAuditLog } from './auditService';
+import { enforceServerEntitlement } from './saasService';
 
 // ============================================================================
 // CUSTOMERS
@@ -98,6 +99,7 @@ export async function createSupplier(
     taxId?: string;
   }
 ): Promise<string> {
+  await enforceServerEntitlement({ organizationId, featureKey: 'purchasing' });
   const supplierId = makeId('sup');
   const path = `suppliers/${supplierId}`;
   try {
@@ -183,6 +185,10 @@ export async function createPurchaseOrder(params: {
   const currentUser = auth.currentUser;
   if (!currentUser) throw new Error('Authentication required.');
   if (params.items.length === 0) throw new Error('Add at least one item to purchase order.');
+  await enforceServerEntitlement({
+    organizationId: params.organizationId,
+    featureKey: 'purchasing',
+  });
 
   const purchaseId = makeId('po');
   const purchaseNumber = `PO-${getDateKey().replace(/-/g, '')}-${purchaseId.slice(-5).toUpperCase()}`;
@@ -429,6 +435,11 @@ export async function createStockTransfer(params: {
     throw new Error('Source and destination branches must be different.');
   }
   if (params.items.length === 0) throw new Error('Select at least one product to transfer.');
+
+  await enforceServerEntitlement({
+    organizationId: params.organizationId,
+    featureKey: 'stock_transfers',
+  });
 
   const transferId = makeId('trf');
   const transferNumber = `TRF-${getDateKey().replace(/-/g, '')}-${transferId.slice(-5).toUpperCase()}`;

@@ -36,8 +36,17 @@ service cloud.firestore {
       return id is string && id.size() >= 3 && id.size() <= 260 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    function isBootstrapAdmin() {
-      return isEmailVerified() && request.auth.token.email == 'appiahkubi848@gmail.com';
+    function platformAdminPath(uid) {
+      return /databases/$(database)/documents/platformAdmins/$(uid);
+    }
+
+    function isPlatformAdmin() {
+      return (isEmailVerified() && request.auth.token.email == 'appiahkubi848@gmail.com') ||
+        (
+          isEmailVerified() &&
+          exists(platformAdminPath(request.auth.uid)) &&
+          get(platformAdminPath(request.auth.uid)).data.isActive == true
+        );
     }
 
     function userPath(uid) {
@@ -56,6 +65,18 @@ service cloud.firestore {
       return /databases/$(database)/documents/branches/$(branchId);
     }
 
+    function tenantPath(tenantId) {
+      return /databases/$(database)/documents/tenants/$(tenantId);
+    }
+
+    function subscriptionPath(subscriptionId) {
+      return /databases/$(database)/documents/subscriptions/$(subscriptionId);
+    }
+
+    function membershipPath(tenantId, uid) {
+      return /databases/$(database)/documents/tenantMemberships/$(tenantId + '_' + uid);
+    }
+
     function hasUserProfile() {
       return isVerifiedOrProvisionedUser() && exists(userPath(request.auth.uid));
     }
@@ -64,16 +85,40 @@ service cloud.firestore {
       return get(userPath(request.auth.uid)).data;
     }
 
-    function isActiveUser() {
+    function isOrgOwner(orgId) {
       return isSignedIn() &&
-        exists(userPath(request.auth.uid)) &&
-        get(userPath(request.auth.uid)).data.accountStatus == 'active';
+        exists(orgPath(orgId)) &&
+        get(orgPath(orgId)).data.ownerUid == request.auth.uid;
+    }
+
+    function isBootstrapOrgOwner(orgId) {
+      return isOrgOwner(orgId) && !exists(tenantPath(orgId));
     }
 
     function isOrgMember(orgId) {
       return isSignedIn() &&
         exists(userPath(request.auth.uid)) &&
         checkOrgMemberDoc(get(userPath(request.auth.uid)).data, orgId);
+    }
+
+    function isTenantMember(tenantId) {
+      return isSignedIn() && (
+        isOrgMember(tenantId) ||
+        (
+          exists(membershipPath(tenantId, request.auth.uid)) &&
+          get(membershipPath(tenantId, request.auth.uid)).data.status == 'active'
+        )
+      );
+    }
+
+    function isTenantOperational(orgId) {
+      return !exists(tenantPath(orgId)) || (
+        get(tenantPath(orgId)).data.status == 'active' &&
+        (
+          !exists(subscriptionPath(get(tenantPath(orgId)).data.subscriptionId)) ||
+          get(subscriptionPath(get(tenantPath(orgId)).data.subscriptionId)).data.status in ['trial', 'active', 'grace_period']
+        )
+      );
     }
 
     function checkOrgMemberDoc(user, orgId) {
@@ -85,14 +130,6 @@ service cloud.firestore {
       return checkOrgMemberDoc(user, orgId) &&
         role.isActive == true &&
         role.scope == 'organization';
-    }
-
-    function isSuperAdmin(orgId) {
-      return isBootstrapAdmin() || (
-        isSignedIn() &&
-        exists(userPath(request.auth.uid)) &&
-        checkSuperAdminDoc(get(userPath(request.auth.uid)).data, orgId)
-      );
     }
 
     function checkSuperAdminDoc(user, orgId) {
@@ -108,11 +145,9 @@ service cloud.firestore {
     }
 
     function hasBranchAccess(orgId, branchId) {
-      return isBootstrapAdmin() || (
-        isSignedIn() &&
+      return isSignedIn() &&
         exists(userPath(request.auth.uid)) &&
-        checkBranchAccessDoc(get(userPath(request.auth.uid)).data, orgId, branchId)
-      );
+        checkBranchAccessDoc(get(userPath(request.auth.uid)).data, orgId, branchId);
     }
 
     function checkPermWithRole(user, perm) {
@@ -139,11 +174,9 @@ service cloud.firestore {
     }
 
     function hasPermission(orgId, perm) {
-      return isBootstrapAdmin() || (
-        isSignedIn() &&
+      return isSignedIn() &&
         exists(userPath(request.auth.uid)) &&
-        checkPermissionDoc(get(userPath(request.auth.uid)).data, orgId, perm)
-      );
+        checkPermissionDoc(get(userPath(request.auth.uid)).data, orgId, perm);
     }
 
     function checkBranchPermWithRole(user, branchId, perm) {
@@ -174,11 +207,9 @@ service cloud.firestore {
     }
 
     function hasBranchPermission(orgId, branchId, perm) {
-      return isBootstrapAdmin() || (
-        isSignedIn() &&
+      return isSignedIn() &&
         exists(userPath(request.auth.uid)) &&
-        checkBranchPermissionDoc(get(userPath(request.auth.uid)).data, orgId, branchId, perm)
-      );
+        checkBranchPermissionDoc(get(userPath(request.auth.uid)).data, orgId, branchId, perm);
     }
 
     function checkBranchAnyPermWithRole(user, branchId, perms) {
@@ -216,11 +247,9 @@ service cloud.firestore {
     }
 
     function hasAnyBranchPermission(orgId, branchId, perms) {
-      return isBootstrapAdmin() || (
-        isSignedIn() &&
+      return isSignedIn() &&
         exists(userPath(request.auth.uid)) &&
-        checkBranchAnyPermissionDoc(get(userPath(request.auth.uid)).data, orgId, branchId, perms)
-      );
+        checkBranchAnyPermissionDoc(get(userPath(request.auth.uid)).data, orgId, branchId, perms);
     }
 
     // 3. Entity Validation Blueprints (Anti-Update-Gap)
@@ -696,18 +725,443 @@ service cloud.firestore {
         isValidId(data.resourceId);
     }
 
-    // 4. Collection Rules
+    function isValidTenant(data) {
+      return data.keys().hasAll(['tenantId', 'organizationId', 'businessName', 'ownerUid', 'ownerEmail', 'currency', 'currencySymbol', 'status', 'currentPlanId', 'subscriptionId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['tenantId', 'organizationId', 'businessName', 'ownerUid', 'ownerEmail', 'contactPhone', 'country', 'currency', 'currencySymbol', 'status', 'currentPlanId', 'subscriptionId', 'deploymentMode', 'customDomain', 'branding', 'suspensionReason', 'createdAt', 'updatedAt']) &&
+        isValidId(data.tenantId) &&
+        isValidId(data.organizationId) &&
+        data.tenantId == data.organizationId &&
+        data.businessName is string && data.businessName.size() >= 2 && data.businessName.size() <= 160 &&
+        isValidId(data.ownerUid) &&
+        data.ownerEmail is string && data.ownerEmail.size() >= 3 && data.ownerEmail.size() <= 160 &&
+        (!('contactPhone' in data) || (data.contactPhone is string && data.contactPhone.size() <= 40)) &&
+        (!('country' in data) || (data.country is string && data.country.size() <= 80)) &&
+        data.currency is string && data.currency.size() >= 3 && data.currency.size() <= 8 &&
+        data.currencySymbol is string && data.currencySymbol.size() >= 1 && data.currencySymbol.size() <= 8 &&
+        data.status in ['active', 'suspended'] &&
+        data.currentPlanId is string && data.currentPlanId.size() >= 2 && data.currentPlanId.size() <= 64 &&
+        isValidId(data.subscriptionId) &&
+        (!('deploymentMode' in data) || data.deploymentMode in ['shared', 'dedicated']) &&
+        (!('customDomain' in data) || (data.customDomain is string && data.customDomain.size() <= 160)) &&
+        (!('branding' in data) || data.branding is map) &&
+        (!('suspensionReason' in data) || (data.suspensionReason is string && data.suspensionReason.size() <= 300));
+    }
+
+    function isValidTenantMembership(data) {
+      return data.keys().hasAll(['membershipId', 'tenantId', 'uid', 'email', 'fullName', 'roleId', 'branchIds', 'defaultBranchId', 'isOwner', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['membershipId', 'tenantId', 'uid', 'email', 'fullName', 'roleId', 'branchIds', 'defaultBranchId', 'isOwner', 'status', 'createdAt', 'updatedAt']) &&
+        isValidCompositeId(data.membershipId) &&
+        isValidId(data.tenantId) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 160 &&
+        isValidId(data.roleId) &&
+        data.branchIds is list && data.branchIds.size() <= 50 &&
+        (data.branchIds.size() == 0 || data.branchIds[0] is string) &&
+        data.defaultBranchId is string && data.defaultBranchId.size() <= 128 &&
+        data.isOwner is bool &&
+        data.status in ['active', 'suspended', 'invited'];
+    }
+
+    function isValidTerminal(data) {
+      return data.keys().hasAll(['terminalId', 'organizationId', 'branchId', 'terminalCode', 'name', 'status', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['terminalId', 'organizationId', 'branchId', 'terminalCode', 'name', 'deviceLabel', 'status', 'lastActiveAt', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.terminalId) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.branchId) &&
+        data.terminalCode is string && data.terminalCode.size() >= 2 && data.terminalCode.size() <= 40 &&
+        data.name is string && data.name.size() >= 2 && data.name.size() <= 120 &&
+        (!('deviceLabel' in data) || (data.deviceLabel is string && data.deviceLabel.size() <= 120)) &&
+        data.status in ['active', 'suspended'] &&
+        isValidId(data.createdBy);
+    }
+
+    function isValidPlan(data) {
+      return data.keys().hasAll(['planId', 'name', 'tagline', 'description', 'currency', 'monthlyPriceMinor', 'annualPriceMinor', 'trialDays', 'gracePeriodDays', 'limits', 'features', 'sortOrder', 'status', 'updatedAt']) &&
+        data.keys().hasOnly(['planId', 'name', 'tagline', 'description', 'currency', 'monthlyPriceMinor', 'annualPriceMinor', 'trialDays', 'gracePeriodDays', 'limits', 'features', 'isCustomPricing', 'sortOrder', 'status', 'updatedAt']) &&
+        isValidId(data.planId) &&
+        data.name is string && data.name.size() >= 2 && data.name.size() <= 80 &&
+        data.tagline is string && data.tagline.size() <= 160 &&
+        data.description is string && data.description.size() <= 500 &&
+        data.currency is string && data.currency.size() >= 3 && data.currency.size() <= 8 &&
+        data.monthlyPriceMinor is int && data.monthlyPriceMinor >= 0 &&
+        data.annualPriceMinor is int && data.annualPriceMinor >= 0 &&
+        data.trialDays is int && data.trialDays >= 0 && data.trialDays <= 90 &&
+        data.gracePeriodDays is int && data.gracePeriodDays >= 0 && data.gracePeriodDays <= 60 &&
+        data.limits is map &&
+        data.features is map &&
+        (!('isCustomPricing' in data) || data.isCustomPricing is bool) &&
+        data.sortOrder is int && data.sortOrder >= 0 &&
+        data.status in ['active', 'archived'];
+    }
+
+    function isValidSubscription(data) {
+      return data.keys().hasAll(['subscriptionId', 'tenantId', 'planId', 'billingCycle', 'status', 'currentPeriodStart', 'currentPeriodEnd', 'paymentProvider', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['subscriptionId', 'tenantId', 'planId', 'billingCycle', 'status', 'trialEndsAt', 'currentPeriodStart', 'currentPeriodEnd', 'gracePeriodEndsAt', 'cancelAtPeriodEnd', 'pendingPlanId', 'pendingBillingCycle', 'paymentProvider', 'paystackCustomerCode', 'paystackSubscriptionCode', 'lastPaymentReference', 'lastPaymentStatus', 'lastRenewalReminderAt', 'customLimits', 'assignedBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.subscriptionId) &&
+        isValidId(data.tenantId) &&
+        data.planId is string && data.planId.size() >= 2 && data.planId.size() <= 64 &&
+        data.billingCycle in ['monthly', 'annual'] &&
+        data.status in ['trial', 'active', 'grace_period', 'past_due', 'expired', 'suspended', 'cancelled'] &&
+        (!('trialEndsAt' in data) || (data.trialEndsAt is string && data.trialEndsAt.size() <= 64)) &&
+        data.currentPeriodStart is string && data.currentPeriodStart.size() >= 4 && data.currentPeriodStart.size() <= 64 &&
+        data.currentPeriodEnd is string && data.currentPeriodEnd.size() >= 4 && data.currentPeriodEnd.size() <= 64 &&
+        (!('gracePeriodEndsAt' in data) || (data.gracePeriodEndsAt is string && data.gracePeriodEndsAt.size() <= 64)) &&
+        (!('cancelAtPeriodEnd' in data) || data.cancelAtPeriodEnd is bool) &&
+        (!('pendingPlanId' in data) || (data.pendingPlanId is string && data.pendingPlanId.size() <= 64)) &&
+        (!('pendingBillingCycle' in data) || data.pendingBillingCycle in ['monthly', 'annual']) &&
+        data.paymentProvider in ['paystack', 'manual', 'trial'] &&
+        (!('paystackCustomerCode' in data) || (data.paystackCustomerCode is string && data.paystackCustomerCode.size() <= 128)) &&
+        (!('paystackSubscriptionCode' in data) || (data.paystackSubscriptionCode is string && data.paystackSubscriptionCode.size() <= 128)) &&
+        (!('lastPaymentReference' in data) || (data.lastPaymentReference is string && data.lastPaymentReference.size() <= 128)) &&
+        (!('lastPaymentStatus' in data) || data.lastPaymentStatus in ['succeeded', 'failed', 'pending']) &&
+        (!('lastRenewalReminderAt' in data) || (data.lastRenewalReminderAt is string && data.lastRenewalReminderAt.size() <= 64)) &&
+        (!('customLimits' in data) || data.customLimits is map) &&
+        (!('assignedBy' in data) || (data.assignedBy is string && data.assignedBy.size() <= 128));
+    }
+
+    function isValidUsageTracking(data) {
+      return data.keys().hasAll(['tenantId', 'branchCount', 'terminalCount', 'staffCount', 'productCount', 'updatedAt']) &&
+        data.keys().hasOnly(['tenantId', 'branchCount', 'terminalCount', 'staffCount', 'productCount', 'updatedAt']) &&
+        isValidId(data.tenantId) &&
+        data.branchCount is int && data.branchCount >= 0 &&
+        data.terminalCount is int && data.terminalCount >= 0 &&
+        data.staffCount is int && data.staffCount >= 0 &&
+        data.productCount is int && data.productCount >= 0;
+    }
+
+    function isValidFeatureOverride(data) {
+      return data.keys().hasAll(['overrideId', 'tenantId', 'reason', 'expiresAt', 'status', 'grantedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['overrideId', 'tenantId', 'featureKey', 'enabled', 'limitOverrides', 'reason', 'expiresAt', 'status', 'grantedBy', 'grantedByEmail', 'createdAt', 'updatedAt']) &&
+        isValidId(data.overrideId) &&
+        isValidId(data.tenantId) &&
+        (!('featureKey' in data) || (data.featureKey is string && data.featureKey.size() <= 64)) &&
+        (!('enabled' in data) || data.enabled is bool) &&
+        (!('limitOverrides' in data) || data.limitOverrides is map) &&
+        data.reason is string && data.reason.size() >= 2 && data.reason.size() <= 300 &&
+        data.expiresAt is string && data.expiresAt.size() >= 4 && data.expiresAt.size() <= 64 &&
+        data.status in ['active', 'revoked'] &&
+        isValidId(data.grantedBy) &&
+        (!('grantedByEmail' in data) || (data.grantedByEmail is string && data.grantedByEmail.size() <= 160));
+    }
+
+    function isValidPlatformAdmin(data) {
+      return data.keys().hasAll(['uid', 'email', 'fullName', 'role', 'isActive', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'fullName', 'role', 'isActive', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 160 &&
+        data.role in ['platform_owner', 'platform_support', 'billing_admin'] &&
+        data.isActive is bool;
+    }
+
+    function isValidPlatformAuditLog(data) {
+      return data.keys().hasAll(['logId', 'actorUid', 'action', 'resourceType', 'resourceId', 'details', 'createdAt']) &&
+        data.keys().hasOnly(['logId', 'actorUid', 'actorEmail', 'targetTenantId', 'action', 'resourceType', 'resourceId', 'details', 'createdAt']) &&
+        isValidId(data.logId) &&
+        isValidId(data.actorUid) &&
+        (!('actorEmail' in data) || (data.actorEmail is string && data.actorEmail.size() <= 160)) &&
+        (!('targetTenantId' in data) || (data.targetTenantId is string && data.targetTenantId.size() <= 128)) &&
+        data.action is string && data.action.size() >= 2 && data.action.size() <= 80 &&
+        data.resourceType is string && data.resourceType.size() >= 2 && data.resourceType.size() <= 80 &&
+        data.resourceId is string && data.resourceId.size() >= 1 && data.resourceId.size() <= 128 &&
+        data.details is string && data.details.size() <= 1000;
+    }
+
+    function isValidSupportTicket(data) {
+      return data.keys().hasAll(['ticketId', 'tenantId', 'tenantName', 'subject', 'category', 'priority', 'status', 'message', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ticketId', 'tenantId', 'tenantName', 'subject', 'category', 'priority', 'status', 'message', 'adminNotes', 'createdBy', 'createdByEmail', 'assignedTo', 'createdAt', 'updatedAt']) &&
+        isValidId(data.ticketId) &&
+        isValidId(data.tenantId) &&
+        data.tenantName is string && data.tenantName.size() >= 1 && data.tenantName.size() <= 160 &&
+        data.subject is string && data.subject.size() >= 2 && data.subject.size() <= 160 &&
+        data.category in ['billing', 'technical', 'entitlements', 'onboarding', 'other'] &&
+        data.priority in ['low', 'medium', 'high', 'urgent'] &&
+        data.status in ['open', 'in_progress', 'resolved', 'closed'] &&
+        data.message is string && data.message.size() >= 2 && data.message.size() <= 2000 &&
+        (!('adminNotes' in data) || (data.adminNotes is string && data.adminNotes.size() <= 2000)) &&
+        isValidId(data.createdBy) &&
+        (!('createdByEmail' in data) || (data.createdByEmail is string && data.createdByEmail.size() <= 160)) &&
+        (!('assignedTo' in data) || (data.assignedTo is string && data.assignedTo.size() <= 128));
+    }
+
+    // 4. SaaS Platform & Billing Collections
+
+    match /tenants/{tenantId} {
+      allow get: if isValidId(tenantId) && isVerifiedOrProvisionedUser() && (isPlatformAdmin() || isTenantMember(tenantId) || isOrgOwner(tenantId));
+      allow list: if isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        existing().ownerUid == request.auth.uid ||
+        (hasUserProfile() && existing().tenantId == currentUser().organizationId)
+      );
+      allow create: if isValidId(tenantId) && isSignedIn() && isValidTenant(incoming()) &&
+        incoming().tenantId == tenantId &&
+        incoming().organizationId == tenantId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isPlatformAdmin() ||
+          (
+            incoming().ownerUid == request.auth.uid &&
+            incoming().status == 'active' &&
+            incoming().currentPlanId in ['starter', 'professional']
+          )
+        );
+      allow update: if isValidId(tenantId) && isVerifiedOrProvisionedUser() && isValidTenant(incoming()) &&
+        incoming().tenantId == existing().tenantId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformAdmin() ||
+          (
+            hasPermission(tenantId, 'settings.manage') &&
+            isTenantOperational(tenantId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['businessName', 'contactPhone', 'country', 'currency', 'currencySymbol', 'branding', 'customDomain', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /tenantMemberships/{membershipId} {
+      allow get: if isValidCompositeId(membershipId) && isSignedIn() && (
+        isPlatformAdmin() ||
+        existing().uid == request.auth.uid ||
+        hasPermission(existing().tenantId, 'users.view')
+      );
+      allow list: if isSignedIn() && (
+        isPlatformAdmin() ||
+        existing().uid == request.auth.uid ||
+        (hasUserProfile() && existing().tenantId == currentUser().organizationId && hasPermission(existing().tenantId, 'users.view'))
+      );
+      allow create: if isValidCompositeId(membershipId) && isSignedIn() && isValidTenantMembership(incoming()) &&
+        membershipId == (incoming().tenantId + '_' + incoming().uid) &&
+        incoming().membershipId == membershipId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isPlatformAdmin() ||
+          (
+            isBootstrapOrgOwner(incoming().tenantId) &&
+            incoming().uid == request.auth.uid &&
+            incoming().isOwner == true &&
+            incoming().status == 'active'
+          ) ||
+          (
+            isTenantOperational(incoming().tenantId) &&
+            hasPermission(incoming().tenantId, 'users.create') &&
+            incoming().isOwner == false
+          ) ||
+          (
+            isEmailVerified() &&
+            incoming().uid == request.auth.uid &&
+            incoming().isOwner == false &&
+            incoming().status == 'active' &&
+            exists(userPath(request.auth.uid)) &&
+            get(userPath(request.auth.uid)).data.organizationId == incoming().tenantId &&
+            get(userPath(request.auth.uid)).data.roleId == incoming().roleId
+          )
+        );
+      allow update: if isValidCompositeId(membershipId) && isVerifiedOrProvisionedUser() && isValidTenantMembership(incoming()) &&
+        incoming().membershipId == existing().membershipId &&
+        incoming().tenantId == existing().tenantId &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformAdmin() ||
+          (
+            isTenantOperational(existing().tenantId) &&
+            hasPermission(existing().tenantId, 'users.manage') &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'roleId', 'branchIds', 'defaultBranchId', 'status', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /terminals/{terminalId} {
+      allow get: if isValidId(terminalId) && isVerifiedOrProvisionedUser() && (isPlatformAdmin() || hasBranchAccess(existing().organizationId, existing().branchId));
+      allow list: if isVerifiedOrProvisionedUser() && (isPlatformAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(terminalId) && isSignedIn() && isValidTerminal(incoming()) &&
+        exists(branchPath(incoming().branchId)) &&
+        (
+          isBootstrapOrgOwner(incoming().organizationId) ||
+          (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'branches.manage'))
+        ) &&
+        incoming().terminalId == terminalId &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(terminalId) && isVerifiedOrProvisionedUser() && isValidTerminal(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
+        incoming().terminalId == existing().terminalId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().branchId == existing().branchId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          (
+            hasPermission(existing().organizationId, 'branches.manage') &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['terminalCode', 'name', 'deviceLabel', 'status', 'lastActiveAt', 'updatedAt'])
+          ) ||
+          (
+            hasBranchAccess(existing().organizationId, existing().branchId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['lastActiveAt', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /plans/{planId} {
+      allow get: if isValidId(planId) && isSignedIn();
+      allow list: if isSignedIn() && existing().status in ['active', 'archived'];
+      allow create, update: if isValidId(planId) && isPlatformAdmin() && isValidPlan(incoming()) &&
+        incoming().planId == planId &&
+        incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /subscriptions/{subscriptionId} {
+      allow get: if isValidId(subscriptionId) && isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        isTenantMember(existing().tenantId) ||
+        isOrgOwner(existing().tenantId)
+      );
+      allow list: if isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        (hasUserProfile() && existing().tenantId == currentUser().organizationId)
+      );
+      allow create: if isValidId(subscriptionId) && isSignedIn() && isValidSubscription(incoming()) &&
+        incoming().subscriptionId == subscriptionId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isPlatformAdmin() ||
+          (
+            isBootstrapOrgOwner(incoming().tenantId) &&
+            incoming().status == 'trial' &&
+            incoming().paymentProvider == 'trial' &&
+            incoming().planId in ['starter', 'professional']
+          )
+        );
+      allow update: if isValidId(subscriptionId) && isPlatformAdmin() && isValidSubscription(incoming()) &&
+        incoming().subscriptionId == existing().subscriptionId &&
+        incoming().tenantId == existing().tenantId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /subscriptionPayments/{paymentId} {
+      allow get: if isValidId(paymentId) && isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        hasPermission(existing().tenantId, 'settings.manage') ||
+        hasPermission(existing().tenantId, 'reports.view')
+      );
+      allow list: if isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        (hasUserProfile() && existing().tenantId == currentUser().organizationId)
+      );
+      // Authoritative payment records are written strictly by verified backend webhooks / Admin SDK.
+      allow create, update, delete: if false;
+    }
+
+    match /usageTracking/{tenantId} {
+      allow get: if isValidId(tenantId) && isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        isTenantMember(tenantId) ||
+        isOrgOwner(tenantId)
+      );
+      allow list: if isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        (hasUserProfile() && existing().tenantId == currentUser().organizationId)
+      );
+      allow create, update: if isValidId(tenantId) && isSignedIn() && isValidUsageTracking(incoming()) &&
+        incoming().tenantId == tenantId &&
+        incoming().updatedAt == request.time && (
+          isPlatformAdmin() ||
+          isBootstrapOrgOwner(tenantId) ||
+          isOrgMember(tenantId)
+        );
+      allow delete: if false;
+    }
+
+    match /featureOverrides/{overrideId} {
+      allow get: if isValidId(overrideId) && isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        isTenantMember(existing().tenantId)
+      );
+      allow list: if isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        (hasUserProfile() && existing().tenantId == currentUser().organizationId)
+      );
+      allow create, update: if isValidId(overrideId) && isPlatformAdmin() && isValidFeatureOverride(incoming()) &&
+        incoming().overrideId == overrideId &&
+        incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /platformAdmins/{uid} {
+      allow get: if isValidId(uid) && isSignedIn() && (request.auth.uid == uid || isPlatformAdmin());
+      allow list: if isPlatformAdmin() && existing().isActive in [true, false];
+      allow create, update: if isValidId(uid) && isPlatformAdmin() && isValidPlatformAdmin(incoming()) &&
+        incoming().uid == uid &&
+        incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /platformAuditLogs/{logId} {
+      allow get: if isValidId(logId) && isPlatformAdmin();
+      allow list: if isPlatformAdmin() && existing().actorUid is string;
+      allow create: if isValidId(logId) && isPlatformAdmin() && isValidPlatformAuditLog(incoming()) &&
+        incoming().logId == logId &&
+        incoming().actorUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /supportTickets/{ticketId} {
+      allow get: if isValidId(ticketId) && isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        isTenantMember(existing().tenantId)
+      );
+      allow list: if isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        (hasUserProfile() && existing().tenantId == currentUser().organizationId)
+      );
+      allow create: if isValidId(ticketId) && isVerifiedOrProvisionedUser() && isValidSupportTicket(incoming()) &&
+        (isPlatformAdmin() || isTenantMember(incoming().tenantId)) &&
+        incoming().ticketId == ticketId &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().status == 'open' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(ticketId) && isPlatformAdmin() && isValidSupportTicket(incoming()) &&
+        incoming().ticketId == existing().ticketId &&
+        incoming().tenantId == existing().tenantId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // 5. Tenant Operational POS & Inventory Collection Rules
 
     match /organizations/{organizationId} {
-      allow get: if isValidId(organizationId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || isOrgMember(organizationId));
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || existing().ownerUid == request.auth.uid);
-      allow create: if isValidId(organizationId) && isBootstrapAdmin() && isValidOrganization(incoming()) &&
+      allow get: if isValidId(organizationId) && isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        isTenantMember(organizationId) ||
+        isOrgOwner(organizationId)
+      );
+      allow list: if isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        existing().ownerUid == request.auth.uid ||
+        (hasUserProfile() && existing().organizationId == currentUser().organizationId)
+      );
+      allow create: if isValidId(organizationId) && isSignedIn() && isValidOrganization(incoming()) &&
         incoming().organizationId == organizationId &&
         incoming().ownerUid == request.auth.uid &&
+        incoming().status == 'active' &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(organizationId) && isVerifiedOrProvisionedUser() && isValidOrganization(incoming()) &&
-        (isBootstrapAdmin() || hasPermission(organizationId, 'settings.manage')) &&
+        (
+          isPlatformAdmin() ||
+          (isTenantOperational(organizationId) && hasPermission(organizationId, 'settings.manage'))
+        ) &&
         incoming().organizationId == existing().organizationId &&
         incoming().ownerUid == existing().ownerUid &&
         incoming().createdAt == existing().createdAt &&
@@ -717,15 +1171,26 @@ service cloud.firestore {
     }
 
     match /branches/{branchId} {
-      allow get: if isValidId(branchId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || hasBranchAccess(existing().organizationId, branchId) || hasPermission(existing().organizationId, 'branches.view'));
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
-      allow create: if isValidId(branchId) && isVerifiedOrProvisionedUser() && isValidBranch(incoming()) &&
+      allow get: if isValidId(branchId) && isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        hasBranchAccess(existing().organizationId, branchId) ||
+        hasPermission(existing().organizationId, 'branches.view')
+      );
+      allow list: if isVerifiedOrProvisionedUser() && (
+        isPlatformAdmin() ||
+        (hasUserProfile() && existing().organizationId == currentUser().organizationId)
+      );
+      allow create: if isValidId(branchId) && isSignedIn() && isValidBranch(incoming()) &&
         exists(orgPath(incoming().organizationId)) &&
-        hasPermission(incoming().organizationId, 'branches.create') &&
+        (
+          isBootstrapOrgOwner(incoming().organizationId) ||
+          (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'branches.create'))
+        ) &&
         incoming().branchId == branchId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(branchId) && isVerifiedOrProvisionedUser() && isValidBranch(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         (hasPermission(existing().organizationId, 'branches.edit') || hasPermission(existing().organizationId, 'branches.manage')) &&
         incoming().branchId == existing().branchId &&
         incoming().organizationId == existing().organizationId &&
@@ -736,22 +1201,22 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow get: if isValidId(userId) && isVerifiedOrProvisionedUser() && (
+      allow get: if isValidId(userId) && isSignedIn() && (
         request.auth.uid == userId ||
-        isBootstrapAdmin() ||
+        isPlatformAdmin() ||
         hasPermission(existing().organizationId, 'users.view')
       );
       allow list: if isVerifiedOrProvisionedUser() && (
         existing().uid == request.auth.uid ||
-        isBootstrapAdmin() ||
+        isPlatformAdmin() ||
         (hasUserProfile() && existing().organizationId == currentUser().organizationId && hasPermission(existing().organizationId, 'users.view'))
       );
-      allow create: if isValidId(userId) && isVerifiedOrProvisionedUser() && isValidUser(incoming()) &&
+      allow create: if isValidId(userId) && isSignedIn() && isValidUser(incoming()) &&
         incoming().uid == userId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time && (
-          (isBootstrapAdmin() && incoming().uid == request.auth.uid) ||
-          hasPermission(incoming().organizationId, 'users.create') ||
+          (isBootstrapOrgOwner(incoming().organizationId) && incoming().uid == request.auth.uid && incoming().accountStatus == 'active') ||
+          (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'users.create')) ||
           (
             isEmailVerified() &&
             incoming().uid == request.auth.uid &&
@@ -770,15 +1235,36 @@ service cloud.firestore {
         );
       allow update: if isValidId(userId) && isVerifiedOrProvisionedUser() && isValidUser(incoming()) &&
         incoming().uid == existing().uid &&
-        incoming().organizationId == existing().organizationId &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           (
             request.auth.uid == userId &&
             existing().accountStatus == 'active' &&
+            incoming().organizationId == existing().organizationId &&
             incoming().diff(existing()).affectedKeys().hasOnly(['lastLogin', 'updatedAt'])
           ) ||
           (
+            request.auth.uid == userId &&
+            existing().accountStatus == 'active' &&
+            exists(membershipPath(incoming().organizationId, userId)) &&
+            get(membershipPath(incoming().organizationId, userId)).data.status == 'active' &&
+            incoming().roleId == get(membershipPath(incoming().organizationId, userId)).data.roleId &&
+            incoming().branchIds == get(membershipPath(incoming().organizationId, userId)).data.branchIds &&
+            incoming().grantedPermissions.size() == 0 &&
+            incoming().deniedPermissions.size() == 0 &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['organizationId', 'roleId', 'branchIds', 'defaultBranchId', 'grantedPermissions', 'deniedPermissions', 'lastLogin', 'updatedAt'])
+          ) ||
+          (
+            isBootstrapOrgOwner(incoming().organizationId) &&
+            request.auth.uid == userId &&
+            incoming().grantedPermissions.size() == 0 &&
+            incoming().deniedPermissions.size() == 0 &&
+            incoming().accountStatus == 'active' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['organizationId', 'roleId', 'branchIds', 'defaultBranchId', 'grantedPermissions', 'deniedPermissions', 'lastLogin', 'updatedAt'])
+          ) ||
+          (
+            incoming().organizationId == existing().organizationId &&
+            isTenantOperational(existing().organizationId) &&
             (hasPermission(existing().organizationId, 'users.edit') || hasPermission(existing().organizationId, 'users.manage') || hasPermission(existing().organizationId, 'users.suspend')) &&
             incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'phone', 'branchIds', 'defaultBranchId', 'roleId', 'grantedPermissions', 'deniedPermissions', 'accountStatus', 'updatedAt'])
           )
@@ -787,14 +1273,18 @@ service cloud.firestore {
     }
 
     match /roles/{roleId} {
-      allow get: if isValidId(roleId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || isOrgMember(existing().organizationId));
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
-      allow create: if isValidId(roleId) && isVerifiedOrProvisionedUser() && isValidRole(incoming()) &&
-        hasPermission(incoming().organizationId, 'roles.create') &&
+      allow get: if isValidId(roleId) && isVerifiedOrProvisionedUser() && (isPlatformAdmin() || isOrgMember(existing().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (isPlatformAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(roleId) && isSignedIn() && isValidRole(incoming()) &&
+        (
+          isBootstrapOrgOwner(incoming().organizationId) ||
+          (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'roles.create'))
+        ) &&
         incoming().roleId == roleId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(roleId) && isVerifiedOrProvisionedUser() && isValidRole(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         (hasPermission(existing().organizationId, 'roles.edit') || hasPermission(existing().organizationId, 'roles.manage')) &&
         incoming().roleId == existing().roleId &&
         incoming().organizationId == existing().organizationId &&
@@ -802,15 +1292,19 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'scope', 'permissions', 'isActive', 'updatedAt']);
       allow delete: if isValidId(roleId) && isVerifiedOrProvisionedUser() &&
+        isTenantOperational(existing().organizationId) &&
         hasPermission(existing().organizationId, 'roles.delete') &&
         existing().isSystem == false;
     }
 
     match /permissions/{permissionId} {
-      allow get: if isValidId(permissionId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || isOrgMember(existing().organizationId));
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
-      allow create, update: if isValidId(permissionId) && isVerifiedOrProvisionedUser() && isValidPermissionDef(incoming()) &&
-        hasPermission(incoming().organizationId, 'roles.manage');
+      allow get: if isValidId(permissionId) && isVerifiedOrProvisionedUser() && (isPlatformAdmin() || isOrgMember(existing().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (isPlatformAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create, update: if isValidId(permissionId) && isSignedIn() && isValidPermissionDef(incoming()) &&
+        (
+          isBootstrapOrgOwner(incoming().organizationId) ||
+          (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'roles.manage'))
+        );
       allow delete: if false;
     }
 
@@ -824,10 +1318,10 @@ service cloud.firestore {
           existing().email == request.auth.token.email.lower() ||
           existing().email == request.auth.token.email
         )) ||
-        isBootstrapAdmin() ||
         (hasUserProfile() && existing().organizationId == currentUser().organizationId && hasPermission(existing().organizationId, 'users.view'))
       );
       allow create: if isValidId(invitationId) && isVerifiedOrProvisionedUser() && isValidInvitation(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasPermission(incoming().organizationId, 'users.create') &&
         incoming().invitationId == invitationId &&
         incoming().invitedBy == request.auth.uid &&
@@ -849,6 +1343,7 @@ service cloud.firestore {
           ) ||
           (
             isVerifiedOrProvisionedUser() &&
+            isTenantOperational(existing().organizationId) &&
             hasPermission(existing().organizationId, 'users.manage') &&
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'roleId', 'branchIds', 'defaultBranchId', 'updatedAt'])
           )
@@ -858,13 +1353,17 @@ service cloud.firestore {
 
     match /categories/{categoryId} {
       allow get: if isValidId(categoryId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
-      allow create: if isValidId(categoryId) && isVerifiedOrProvisionedUser() && isValidCategory(incoming()) &&
-        hasPermission(incoming().organizationId, 'products.create') &&
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
+      allow create: if isValidId(categoryId) && isSignedIn() && isValidCategory(incoming()) &&
+        (
+          isBootstrapOrgOwner(incoming().organizationId) ||
+          (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'products.create'))
+        ) &&
         incoming().categoryId == categoryId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(categoryId) && isVerifiedOrProvisionedUser() && isValidCategory(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         hasPermission(existing().organizationId, 'products.edit') &&
         incoming().categoryId == existing().categoryId &&
         incoming().organizationId == existing().organizationId &&
@@ -876,13 +1375,15 @@ service cloud.firestore {
 
     match /products/{productId} {
       allow get: if isValidId(productId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(productId) && isVerifiedOrProvisionedUser() && isValidProduct(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasPermission(incoming().organizationId, 'products.create') &&
         incoming().productId == productId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(productId) && isVerifiedOrProvisionedUser() && isValidProduct(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         (hasPermission(existing().organizationId, 'products.edit') || hasPermission(existing().organizationId, 'products.delete')) &&
         incoming().productId == existing().productId &&
         incoming().organizationId == existing().organizationId &&
@@ -894,13 +1395,15 @@ service cloud.firestore {
 
     match /branchInventory/{inventoryId} {
       allow get: if isValidCompositeId(inventoryId) && isVerifiedOrProvisionedUser() && (resource == null || hasBranchAccess(existing().organizationId, existing().branchId));
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidCompositeId(inventoryId) && isVerifiedOrProvisionedUser() && isValidBranchInventory(incoming()) &&
         exists(branchPath(incoming().branchId)) &&
+        isTenantOperational(incoming().organizationId) &&
         hasAnyBranchPermission(incoming().organizationId, incoming().branchId, ['inventory.adjust', 'purchases.approve', 'inventory.transfer']) &&
         incoming().inventoryId == inventoryId &&
         incoming().updatedAt == request.time;
       allow update: if isValidCompositeId(inventoryId) && isVerifiedOrProvisionedUser() && isValidBranchInventory(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         incoming().inventoryId == existing().inventoryId &&
         incoming().organizationId == existing().organizationId &&
         incoming().branchId == existing().branchId &&
@@ -913,8 +1416,9 @@ service cloud.firestore {
 
     match /stockMovements/{movementId} {
       allow get: if isValidId(movementId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(movementId) && isVerifiedOrProvisionedUser() && isValidStockMovement(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasBranchAccess(incoming().organizationId, incoming().branchId) &&
         incoming().movementId == movementId &&
         incoming().performedBy == request.auth.uid &&
@@ -924,14 +1428,16 @@ service cloud.firestore {
 
     match /sales/{saleId} {
       allow get: if isValidId(saleId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(saleId) && isVerifiedOrProvisionedUser() && isValidSale(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.create') &&
         incoming().saleId == saleId &&
         incoming().cashierId == request.auth.uid &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(saleId) && isVerifiedOrProvisionedUser() && isValidSale(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         hasBranchPermission(existing().organizationId, existing().branchId, 'sales.approve') &&
         incoming().saleId == existing().saleId &&
         incoming().organizationId == existing().organizationId &&
@@ -943,12 +1449,14 @@ service cloud.firestore {
 
       match /items/{itemId} {
         allow get: if isValidId(saleId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
-        allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+        allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
         allow create: if isValidId(saleId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidSaleItem(incoming()) &&
+          isTenantOperational(incoming().organizationId) &&
           hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.create') &&
           incoming().saleId == saleId &&
           incoming().itemId == itemId;
         allow update: if isValidId(saleId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidSaleItem(incoming()) &&
+          isTenantOperational(existing().organizationId) &&
           hasBranchPermission(existing().organizationId, existing().branchId, 'sales.approve') &&
           incoming().diff(existing()).affectedKeys().hasOnly(['returnedQuantity']);
         allow delete: if false;
@@ -957,12 +1465,14 @@ service cloud.firestore {
 
     match /payments/{paymentId} {
       allow get: if isValidId(paymentId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(paymentId) && isVerifiedOrProvisionedUser() && isValidPayment(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.create') &&
         incoming().paymentId == paymentId &&
         incoming().createdAt == request.time;
       allow update: if isValidId(paymentId) && isVerifiedOrProvisionedUser() && isValidPayment(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         hasBranchPermission(existing().organizationId, existing().branchId, 'sales.approve') &&
         incoming().diff(existing()).affectedKeys().hasOnly(['status']);
       allow delete: if false;
@@ -970,13 +1480,15 @@ service cloud.firestore {
 
     match /customers/{customerId} {
       allow get: if isValidId(customerId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(customerId) && isVerifiedOrProvisionedUser() && isValidCustomer(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasBranchPermission(incoming().organizationId, incoming().branchId, 'customers.create') &&
         incoming().customerId == customerId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(customerId) && isVerifiedOrProvisionedUser() && isValidCustomer(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         incoming().customerId == existing().customerId &&
         incoming().organizationId == existing().organizationId &&
         incoming().createdAt == existing().createdAt &&
@@ -991,13 +1503,15 @@ service cloud.firestore {
 
     match /suppliers/{supplierId} {
       allow get: if isValidId(supplierId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(supplierId) && isVerifiedOrProvisionedUser() && isValidSupplier(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasPermission(incoming().organizationId, 'suppliers.manage') &&
         incoming().supplierId == supplierId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(supplierId) && isVerifiedOrProvisionedUser() && isValidSupplier(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         hasPermission(existing().organizationId, 'suppliers.manage') &&
         incoming().supplierId == existing().supplierId &&
         incoming().organizationId == existing().organizationId &&
@@ -1009,14 +1523,16 @@ service cloud.firestore {
 
     match /purchases/{purchaseId} {
       allow get: if isValidId(purchaseId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(purchaseId) && isVerifiedOrProvisionedUser() && isValidPurchase(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasBranchPermission(incoming().organizationId, incoming().branchId, 'purchases.create') &&
         incoming().purchaseId == purchaseId &&
         incoming().createdBy == request.auth.uid &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(purchaseId) && isVerifiedOrProvisionedUser() && isValidPurchase(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         incoming().purchaseId == existing().purchaseId &&
         incoming().organizationId == existing().organizationId &&
         incoming().branchId == existing().branchId &&
@@ -1036,8 +1552,9 @@ service cloud.firestore {
 
       match /items/{itemId} {
         allow get: if isValidId(purchaseId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
-        allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+        allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
         allow create: if isValidId(purchaseId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidPurchaseItem(incoming()) &&
+          isTenantOperational(incoming().organizationId) &&
           hasBranchPermission(incoming().organizationId, incoming().branchId, 'purchases.create') &&
           incoming().purchaseId == purchaseId &&
           incoming().itemId == itemId;
@@ -1050,14 +1567,16 @@ service cloud.firestore {
         hasBranchAccess(existing().organizationId, existing().sourceBranchId) ||
         hasBranchAccess(existing().organizationId, existing().destinationBranchId)
       );
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(transferId) && isVerifiedOrProvisionedUser() && isValidStockTransfer(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasBranchPermission(incoming().organizationId, incoming().sourceBranchId, 'inventory.transfer') &&
         incoming().transferId == transferId &&
         incoming().requestedBy == request.auth.uid &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(transferId) && isVerifiedOrProvisionedUser() && isValidStockTransfer(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         incoming().transferId == existing().transferId &&
         incoming().organizationId == existing().organizationId &&
         incoming().sourceBranchId == existing().sourceBranchId &&
@@ -1075,12 +1594,14 @@ service cloud.firestore {
 
       match /items/{itemId} {
         allow get: if isValidId(transferId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
-        allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+        allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
         allow create: if isValidId(transferId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidTransferItem(incoming()) &&
+          isTenantOperational(incoming().organizationId) &&
           hasPermission(incoming().organizationId, 'inventory.transfer') &&
           incoming().transferId == transferId &&
           incoming().itemId == itemId;
         allow update: if isValidId(transferId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidTransferItem(incoming()) &&
+          isTenantOperational(existing().organizationId) &&
           hasPermission(existing().organizationId, 'inventory.transfer') &&
           incoming().diff(existing()).affectedKeys().hasOnly(['receivedQuantity', 'damagedQuantity']);
         allow delete: if false;
@@ -1089,8 +1610,9 @@ service cloud.firestore {
 
     match /refunds/{refundId} {
       allow get: if isValidId(refundId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(refundId) && isVerifiedOrProvisionedUser() && isValidRefund(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.refund') &&
         incoming().refundId == refundId &&
         incoming().requestedBy == request.auth.uid &&
@@ -1098,6 +1620,7 @@ service cloud.firestore {
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(refundId) && isVerifiedOrProvisionedUser() && isValidRefund(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         hasBranchPermission(existing().organizationId, existing().branchId, 'sales.approve') &&
         existing().status in ['pending', 'approved'] &&
         incoming().refundId == existing().refundId &&
@@ -1110,8 +1633,9 @@ service cloud.firestore {
 
       match /items/{itemId} {
         allow get: if isValidId(refundId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
-        allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+        allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
         allow create: if isValidId(refundId) && isValidId(itemId) && isVerifiedOrProvisionedUser() && isValidRefundItem(incoming()) &&
+          isTenantOperational(incoming().organizationId) &&
           hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.refund') &&
           incoming().refundId == refundId &&
           incoming().itemId == itemId;
@@ -1121,8 +1645,9 @@ service cloud.firestore {
 
     match /cashSessions/{sessionId} {
       allow get: if isValidId(sessionId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(sessionId) && isVerifiedOrProvisionedUser() && isValidCashSession(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasBranchPermission(incoming().organizationId, incoming().branchId, 'cashSessions.open') &&
         incoming().sessionId == sessionId &&
         incoming().cashierId == request.auth.uid &&
@@ -1130,6 +1655,7 @@ service cloud.firestore {
         incoming().openedAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(sessionId) && isVerifiedOrProvisionedUser() && isValidCashSession(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         incoming().sessionId == existing().sessionId &&
         incoming().organizationId == existing().organizationId &&
         incoming().branchId == existing().branchId &&
@@ -1157,8 +1683,9 @@ service cloud.firestore {
 
       match /transactions/{transactionId} {
         allow get: if isValidId(sessionId) && isValidId(transactionId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
-        allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+        allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
         allow create: if isValidId(sessionId) && isValidId(transactionId) && isVerifiedOrProvisionedUser() && isValidCashSessionTx(incoming()) &&
+          isTenantOperational(incoming().organizationId) &&
           hasBranchAccess(incoming().organizationId, incoming().branchId) &&
           get(/databases/$(database)/documents/cashSessions/$(sessionId)).data.status == 'open' &&
           incoming().sessionId == sessionId &&
@@ -1171,8 +1698,9 @@ service cloud.firestore {
 
     match /expenses/{expenseId} {
       allow get: if isValidId(expenseId) && isVerifiedOrProvisionedUser() && hasBranchAccess(existing().organizationId, existing().branchId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(expenseId) && isVerifiedOrProvisionedUser() && isValidExpense(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasBranchPermission(incoming().organizationId, incoming().branchId, 'expenses.create') &&
         incoming().expenseId == expenseId &&
         incoming().submittedBy == request.auth.uid &&
@@ -1180,6 +1708,7 @@ service cloud.firestore {
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(expenseId) && isVerifiedOrProvisionedUser() && isValidExpense(incoming()) &&
+        isTenantOperational(existing().organizationId) &&
         hasBranchPermission(existing().organizationId, existing().branchId, 'expenses.approve') &&
         existing().approvalStatus == 'pending' &&
         incoming().expenseId == existing().expenseId &&
@@ -1192,10 +1721,10 @@ service cloud.firestore {
     }
 
     match /auditLogs/{logId} {
-      allow get: if isValidId(logId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || hasPermission(existing().organizationId, 'auditLogs.view'));
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
-      allow create: if isValidId(logId) && isVerifiedOrProvisionedUser() && isValidAuditLog(incoming()) &&
-        (isBootstrapAdmin() || isOrgMember(incoming().organizationId)) &&
+      allow get: if isValidId(logId) && isVerifiedOrProvisionedUser() && (isPlatformAdmin() || hasPermission(existing().organizationId, 'auditLogs.view'));
+      allow list: if isVerifiedOrProvisionedUser() && (isPlatformAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create: if isValidId(logId) && isSignedIn() && isValidAuditLog(incoming()) &&
+        (isBootstrapOrgOwner(incoming().organizationId) || isOrgMember(incoming().organizationId)) &&
         incoming().logId == logId &&
         incoming().userId == request.auth.uid &&
         incoming().createdAt == request.time;
@@ -1204,8 +1733,9 @@ service cloud.firestore {
 
     match /branchDailySummaries/{summaryId} {
       allow get: if isValidCompositeId(summaryId) && isVerifiedOrProvisionedUser() && (resource == null || hasBranchAccess(existing().organizationId, existing().branchId));
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create, update: if isValidCompositeId(summaryId) && isVerifiedOrProvisionedUser() && isValidBranchDailySummary(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasBranchAccess(incoming().organizationId, incoming().branchId) &&
         incoming().summaryId == summaryId &&
         incoming().updatedAt == request.time;
@@ -1213,10 +1743,13 @@ service cloud.firestore {
     }
 
     match /systemSettings/{settingId} {
-      allow get: if isValidId(settingId) && isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || isOrgMember(existing().organizationId));
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
-      allow create, update: if isValidId(settingId) && isVerifiedOrProvisionedUser() && isValidSystemSettings(incoming()) &&
-        (isBootstrapAdmin() || hasPermission(incoming().organizationId, 'settings.manage')) &&
+      allow get: if isValidId(settingId) && isVerifiedOrProvisionedUser() && (isPlatformAdmin() || isOrgMember(existing().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (isPlatformAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow create, update: if isValidId(settingId) && isSignedIn() && isValidSystemSettings(incoming()) &&
+        (
+          isBootstrapOrgOwner(incoming().organizationId) ||
+          (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'settings.manage'))
+        ) &&
         incoming().settingId == settingId &&
         incoming().updatedAt == request.time;
       allow delete: if false;
@@ -1224,7 +1757,7 @@ service cloud.firestore {
 
     match /notifications/{notificationId} {
       allow get: if isValidId(notificationId) && isVerifiedOrProvisionedUser() && isOrgMember(existing().organizationId);
-      allow list: if isVerifiedOrProvisionedUser() && (isBootstrapAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
+      allow list: if isVerifiedOrProvisionedUser() && (hasUserProfile() && existing().organizationId == currentUser().organizationId);
       allow create: if isValidId(notificationId) && isVerifiedOrProvisionedUser() && isValidNotification(incoming()) &&
         isOrgMember(incoming().organizationId) &&
         incoming().notificationId == notificationId &&
@@ -1239,6 +1772,7 @@ service cloud.firestore {
       allow get: if isValidId(keyId) && isVerifiedOrProvisionedUser() && (resource == null || hasBranchAccess(existing().organizationId, existing().branchId));
       allow list: if false;
       allow create: if isValidId(keyId) && isVerifiedOrProvisionedUser() && isValidIdempotencyKey(incoming()) &&
+        isTenantOperational(incoming().organizationId) &&
         hasBranchPermission(incoming().organizationId, incoming().branchId, 'sales.create') &&
         incoming().keyId == keyId &&
         incoming().createdAt == request.time;

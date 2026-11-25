@@ -12,9 +12,21 @@ async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
 
   app.set('trust proxy', 1);
-  app.use(express.json({ limit: '1mb' }));
+  app.use(
+    express.json({
+      limit: '1mb',
+      verify: (req, _res, buf) => {
+        (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+      },
+    })
+  );
   app.use(attachRequestContext);
   app.use('/api', apiRateLimiter, apiRouter);
+  app.use('/api', (req, res) => {
+    res.status(404).json({
+      error: `API route not found: ${req.method} ${req.originalUrl}`,
+    });
+  });
 
   if (!isProd) {
     const vite = await createViteServer({

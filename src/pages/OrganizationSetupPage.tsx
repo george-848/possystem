@@ -1,12 +1,16 @@
 import React, { useState } from 'react';
-import { Building2, CheckCircle2, LogOut } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { ArrowLeft, Building2, CheckCircle2, LogOut } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
-import { bootstrapOrganizationSetup } from '../services/orgService';
+import { DEFAULT_SAAS_PLANS } from '../lib/entitlements';
+import { formatMoney } from '../lib/money';
+import { registerTenantBusiness } from '../services/saasService';
 
 export function OrganizationSetupPage() {
-  const { firebaseUser, logout } = useAuth();
+  const { firebaseUser, userProfile, logout } = useAuth();
   const { notify } = useToast();
+  const navigate = useNavigate();
 
   const [businessName, setBusinessName] = useState('');
   const [registrationNumber, setRegistrationNumber] = useState('');
@@ -23,15 +27,20 @@ export function OrganizationSetupPage() {
   const [branchName, setBranchName] = useState('Head Office Flagship Store');
   const [branchCity, setBranchCity] = useState('Accra');
   const [branchRegion, setBranchRegion] = useState('Greater Accra');
+  const [planId, setPlanId] = useState<'starter' | 'professional'>('starter');
   const [seedStarterCategories, setSeedStarterCategories] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+
+  const trialPlans = DEFAULT_SAAS_PLANS.filter(
+    (p) => p.planId === 'starter' || p.planId === 'professional'
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
     try {
       const taxBps = Math.round(Number.parseFloat(taxRatePct || '0') * 100);
-      await bootstrapOrganizationSetup({
+      await registerTenantBusiness({
         businessName,
         registrationNumber,
         email,
@@ -48,18 +57,20 @@ export function OrganizationSetupPage() {
         branchRegion,
         branchAddress: address,
         branchPhone: phone,
+        planId,
         seedStarterCategories,
       });
       notify(
         'success',
-        'Organization Initialized',
-        'Super Admin account, default RBAC roles, and primary branch created.'
+        'Business Workspace Created',
+        'Tenant workspace, 14-day trial subscription, RBAC roles, and Branch BR-001 are ready.'
       );
+      navigate('/dashboard');
     } catch (err) {
       notify(
         'error',
         'Setup Failed',
-        err instanceof Error ? err.message : 'Unable to initialize organization.'
+        err instanceof Error ? err.message : 'Unable to register retail business.'
       );
     } finally {
       setSubmitting(false);
@@ -76,24 +87,72 @@ export function OrganizationSetupPage() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-slate-900 font-display">
-                Organization & Super Admin Bootstrap
+                Register Retail Business Workspace
               </h1>
               <p className="text-xs text-slate-500">
-                Signed in as {firebaseUser?.email} · Configures tenant defaults, RBAC roles, and Branch BR-001
+                Signed in as {firebaseUser?.email} · Provisions isolated tenant data, RBAC roles, POS-01, and 14-day free trial
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => void logout()}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-600 hover:bg-slate-50"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            Sign Out
-          </button>
+          <div className="flex items-center gap-2">
+            {userProfile && (
+              <button
+                type="button"
+                onClick={() => navigate('/dashboard')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-600 hover:bg-slate-50"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Back to Workspace
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => void logout()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-600 hover:bg-slate-50"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Sign Out
+            </button>
+          </div>
         </div>
 
         <form onSubmit={(e) => void handleSubmit(e)} className="space-y-6">
+          {/* Plan Selection */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-800 mb-2">
+              Select Starting 14-Day Free Trial Package *
+            </label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {trialPlans.map((plan) => {
+                const selected = planId === plan.planId;
+                return (
+                  <button
+                    key={plan.planId}
+                    type="button"
+                    onClick={() => setPlanId(plan.planId as 'starter' | 'professional')}
+                    className={`text-left p-4 rounded-xl border transition-colors ${
+                      selected
+                        ? 'border-emerald-600 bg-emerald-50/50'
+                        : 'border-slate-200 bg-white hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-bold text-slate-900">{plan.name}</span>
+                      <span className="text-xs font-mono font-semibold text-emerald-700">
+                        {formatMoney(plan.monthlyPriceMinor, 'GH₵')}/mo after trial
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-600 mt-1">{plan.tagline}</p>
+                    <p className="text-[11px] text-slate-500 mt-2 font-mono">
+                      {plan.limits.maxBranches} branch{plan.limits.maxBranches === 1 ? '' : 'es'} ·{' '}
+                      {plan.limits.maxTerminals} POS terminals · {plan.limits.maxStaff} staff
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="md:col-span-2">
               <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -282,7 +341,7 @@ export function OrganizationSetupPage() {
               className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition-colors disabled:opacity-50"
             >
               <CheckCircle2 className="w-4 h-4" />
-              {submitting ? 'Initializing Platform...' : 'Complete Organization Setup'}
+              {submitting ? 'Creating Workspace...' : 'Create Tenant & Start 14-Day Trial'}
             </button>
           </div>
         </form>

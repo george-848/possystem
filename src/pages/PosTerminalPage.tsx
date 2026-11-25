@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   CreditCard,
   Minus,
+  Monitor,
   Package,
   Plus,
   Search,
@@ -25,6 +26,7 @@ import {
 import { ReceiptModal } from '../components/ReceiptModal';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
+import { useEntitlements } from '../contexts/EntitlementContext';
 import { useToast } from '../contexts/ToastContext';
 import {
   findProductByScanCode,
@@ -63,7 +65,21 @@ export function PosTerminalPage() {
     hasPermission,
   } = useAuth();
   const { products, categories, branchInventory, customers, cashSessions } = useData();
+  const { terminals, entitlements } = useEntitlements();
   const { notify } = useToast();
+
+  const branchTerminals = useMemo(
+    () => terminals.filter((t) => t.branchId === activeBranchId && t.status === 'active'),
+    [terminals, activeBranchId]
+  );
+  const [selectedTerminalId, setSelectedTerminalId] = useState('');
+  useEffect(() => {
+    if (branchTerminals.length > 0 && !branchTerminals.some((t) => t.terminalId === selectedTerminalId)) {
+      setSelectedTerminalId(branchTerminals[0].terminalId);
+    } else if (branchTerminals.length === 0) {
+      setSelectedTerminalId('');
+    }
+  }, [branchTerminals, selectedTerminalId]);
 
   const [barcodeInput, setBarcodeInput] = useState('');
   const [search, setSearch] = useState('');
@@ -557,6 +573,23 @@ export function PosTerminalPage() {
                 <Barcode className="w-4 h-4 text-emerald-600" />
                 Barcode Scanner Utility
               </span>
+              {branchTerminals.length > 0 && (
+                <div className="inline-flex items-center gap-1.5 ml-2">
+                  <Monitor className="w-3.5 h-3.5 text-slate-400" />
+                  <select
+                    aria-label="Active POS Terminal"
+                    value={selectedTerminalId}
+                    onChange={(e) => setSelectedTerminalId(e.target.value)}
+                    className="px-2 py-0.5 text-[11px] font-medium bg-slate-50 border border-slate-200 rounded text-slate-700"
+                  >
+                    {branchTerminals.map((t) => (
+                      <option key={t.terminalId} value={t.terminalId}>
+                        {t.terminalCode} · {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <span className="text-[11px] text-slate-400 hidden sm:inline">
                 Press <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded text-[10px] font-mono">F2</kbd> to focus · Prefix <span className="font-mono text-slate-600">3*CODE</span> for multi-qty
               </span>
@@ -926,9 +959,15 @@ export function PosTerminalPage() {
             </span>
           </div>
 
+          {entitlements && !entitlements.isOperational && (
+            <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg p-2.5">
+              {entitlements.blockingReason || 'Subscription is inactive. Renew in Plan & Billing to process sales.'}
+            </p>
+          )}
+
           <button
             type="button"
-            disabled={cart.length === 0}
+            disabled={cart.length === 0 || (entitlements ? !entitlements.isOperational : false)}
             onClick={openPaymentModal}
             className="w-full mt-2 py-3 px-4 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
           >

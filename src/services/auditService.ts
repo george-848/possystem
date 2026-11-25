@@ -26,6 +26,44 @@ export function cleanOptional<T extends Record<string, unknown>>(obj: T): T {
   return result as T;
 }
 
+export class ApiRequestError extends Error {
+  status?: number;
+  code?: string;
+  isFallbackEligible: boolean;
+
+  constructor(
+    message: string,
+    options?: { status?: number; code?: string; isFallbackEligible?: boolean }
+  ) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = options?.status;
+    this.code = options?.code;
+    this.isFallbackEligible = Boolean(options?.isFallbackEligible);
+  }
+}
+
+export function isBackendFallbackError(err: unknown): boolean {
+  if (err instanceof ApiRequestError) {
+    if (err.isFallbackEligible) return true;
+    if (err.code === 'admin_sdk_iam_required') return true;
+    if (err.status === 503 || err.status === 502 || err.status === 504 || err.status === 405) {
+      return true;
+    }
+  }
+  if (err instanceof TypeError) {
+    // Network / fetch unavailable
+    return true;
+  }
+  const msg = err instanceof Error ? err.message : '';
+  return (
+    msg.includes('IAM') ||
+    msg.includes('admin_sdk_iam_required') ||
+    msg.includes('Unexpected response content type') ||
+    msg.includes('Failed to fetch')
+  );
+}
+
 export async function apiRequest<T>(
   path: string,
   options: RequestInit = {}
@@ -39,15 +77,41 @@ export async function apiRequest<T>(
       ...(options.headers || {}),
     },
   });
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(errBody.error || `API request failed (${res.status})`);
-  }
   const contentType = res.headers.get('content-type') || '';
+  if (!res.ok) {
+    const errBody = contentType.includes('application/json')
+      ? ((await res.json().catch(() => ({ error: res.statusText }))) as {
+          error?: string;
+          code?: string;
+        })
+      : { error: res.statusText || `HTTP ${res.status}` };
+    const code = errBody.code;
+    const isFallbackEligible =
+      res.status === 503 ||
+      res.status === 502 ||
+      res.status === 504 ||
+      res.status === 405 ||
+      code === 'admin_sdk_iam_required' ||
+      (!contentType.includes('application/json') && res.status >= 400 && res.status !== 401 && res.status !== 403);
+    throw new ApiRequestError(errBody.error || `API request failed (${res.status})`, {
+      status: res.status,
+      code,
+      isFallbackEligible,
+    });
+  }
   if (contentType.includes('application/json')) {
     return (await res.json()) as T;
   }
-  return (await res.text()) as unknown as T;
+  if (contentType.includes('text/csv') || contentType.includes('text/plain')) {
+    return (await res.text()) as unknown as T;
+  }
+  throw new ApiRequestError(
+    `Unexpected response content type (${contentType || 'unknown'}) from ${path}`,
+    {
+      status: res.status,
+      isFallbackEligible: true,
+    }
+  );
 }
 
 export async function recordAuditLog(params: {

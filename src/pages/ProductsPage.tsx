@@ -11,9 +11,11 @@ import {
   Upload,
   X,
 } from 'lucide-react';
+import { QuotaStatusBar } from '../components/FeatureGate';
 import { ProductImportModal } from '../components/ProductImportModal';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
+import { useEntitlements } from '../contexts/EntitlementContext';
 import { useToast } from '../contexts/ToastContext';
 import { isProductAssignedToBranch } from '../lib/barcode';
 import { formatMoney, fromMinorUnits, toMinorUnits } from '../lib/money';
@@ -27,7 +29,9 @@ import type { Product, TaxCategory } from '../types/pos';
 export function ProductsPage() {
   const { organization, branches, activeBranchId, hasPermission } = useAuth();
   const { products, categories, branchInventory } = useData();
+  const { checkQuota } = useEntitlements();
   const { notify } = useToast();
+  const productQuotaAllowed = checkQuota('products', 1).allowed;
   const [searchParams] = useSearchParams();
   const categoryParam = searchParams.get('category') || 'all';
 
@@ -303,8 +307,9 @@ export function ProductsPage() {
               </button>
               <button
                 type="button"
+                disabled={!productQuotaAllowed}
                 onClick={openCreateModal}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Plus className="w-3.5 h-3.5" />
                 New Product
@@ -313,6 +318,8 @@ export function ProductsPage() {
           )}
         </div>
       </div>
+
+      <QuotaStatusBar resource="products" label="Product Catalog SKUs" />
 
       {/* Filters */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-wrap items-center gap-3">

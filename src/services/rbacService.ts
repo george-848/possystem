@@ -16,6 +16,7 @@ import {
 } from '../lib/firebase';
 import type { AccountStatus, Invitation, Role, UserProfile } from '../types/pos';
 import { cleanOptional, createNotification, makeId, recordAuditLog } from './auditService';
+import { enforceServerEntitlement } from './saasService';
 
 export async function createRole(
   organizationId: string,
@@ -26,6 +27,10 @@ export async function createRole(
     permissions: string[];
   }
 ): Promise<string> {
+  await enforceServerEntitlement({
+    organizationId,
+    featureKey: 'advanced_permissions',
+  });
   const roleId = makeId('role');
   const path = `roles/${roleId}`;
   try {
@@ -112,6 +117,11 @@ export async function createInvitation(
 ): Promise<string> {
   const currentUser = auth.currentUser;
   if (!currentUser) throw new Error('Authentication required.');
+  await enforceServerEntitlement({
+    organizationId,
+    quotaResource: 'staff',
+    increment: 1,
+  });
   const invitationId = makeId('inv');
   const path = `invitations/${invitationId}`;
   try {
@@ -211,6 +221,21 @@ export async function claimInvitationForCurrentUser(
         })
       );
 
+      tx.set(doc(db, 'tenantMemberships', `${invitation.organizationId}_${currentUser.uid}`), {
+        membershipId: `${invitation.organizationId}_${currentUser.uid}`,
+        tenantId: invitation.organizationId,
+        uid: currentUser.uid,
+        email: (currentUser.email || invitation.email).toLowerCase(),
+        fullName: currentUser.displayName || invitation.fullName,
+        roleId: invitation.roleId,
+        branchIds: invitation.branchIds,
+        defaultBranchId: invitation.defaultBranchId,
+        isOwner: false,
+        status: 'active',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
       tx.update(invRef, {
         status: 'accepted',
         updatedAt: serverTimestamp(),
@@ -268,6 +293,12 @@ export async function createStaffUserManually(
     ? data.defaultBranchId
     : data.branchIds[0];
 
+  await enforceServerEntitlement({
+    organizationId,
+    quotaResource: 'staff',
+    increment: 1,
+  });
+
   const { uid, verificationEmailSent } = await provisionStaffAuthUser({
     email: cleanEmail,
     password: data.password,
@@ -293,6 +324,20 @@ export async function createStaffUserManually(
             updatedAt: serverTimestamp(),
           })
         );
+        await setDoc(doc(db, 'tenantMemberships', `${organizationId}_${newUid}`), {
+          membershipId: `${organizationId}_${newUid}`,
+          tenantId: organizationId,
+          uid: newUid,
+          email: cleanEmail,
+          fullName: cleanName,
+          roleId: data.roleId,
+          branchIds: data.branchIds,
+          defaultBranchId,
+          isOwner: false,
+          status,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
       } catch (error) {
         handleFirestoreError(error, OperationType.CREATE, userPath);
       }
@@ -346,11 +391,37 @@ export async function updateUserAccess(
   >
 ): Promise<void> {
   const path = `users/${targetUid}`;
+  if (
+    updates.grantedPermissions !== undefined ||
+    updates.deniedPermissions !== undefined
+  ) {
+    await enforceServerEntitlement({
+      organizationId,
+      featureKey: 'advanced_permissions',
+    });
+  }
   try {
     await updateDoc(doc(db, 'users', targetUid), {
       ...updates,
       updatedAt: serverTimestamp(),
     });
+    const membershipUpdates: Record<string, unknown> = {
+      updatedAt: serverTimestamp(),
+    };
+    if (updates.fullName !== undefined) membershipUpdates.fullName = updates.fullName;
+    if (updates.roleId !== undefined) membershipUpdates.roleId = updates.roleId;
+    if (updates.branchIds !== undefined) membershipUpdates.branchIds = updates.branchIds;
+    if (updates.defaultBranchId !== undefined) {
+      membershipUpdates.defaultBranchId = updates.defaultBranchId;
+    }
+    if (updates.accountStatus !== undefined) membershipUpdates.status = updates.accountStatus;
+    if (Object.keys(membershipUpdates).length > 1) {
+      await updateDoc(doc(db, 'tenantMemberships', `${organizationId}_${targetUid}`), membershipUpdates).catch(
+        () => {
+          // Legacy users without tenantMemberships doc yet will be synced via backend/switch
+        }
+      );
+    }
     const action =
       updates.accountStatus === 'suspended'
         ? 'user.suspend'

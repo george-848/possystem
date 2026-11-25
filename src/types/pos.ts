@@ -486,3 +486,228 @@ export interface AppNotification {
   readBy: string[];
   createdAt?: unknown;
 }
+
+// ============================================================================
+// Multi-Tenant SaaS, Subscription Plans, Entitlements & Billing Types
+// ============================================================================
+
+export type PlanId = 'starter' | 'professional' | 'business_plus' | 'enterprise';
+
+export type BillingCycle = 'monthly' | 'annual';
+
+export type SubscriptionStatus =
+  | 'trial'
+  | 'active'
+  | 'grace_period'
+  | 'past_due'
+  | 'expired'
+  | 'suspended'
+  | 'cancelled';
+
+export type FeatureKey =
+  | 'basic_pos'
+  | 'basic_reports'
+  | 'multi_branch'
+  | 'stock_transfers'
+  | 'advanced_inventory'
+  | 'purchasing'
+  | 'warehouse_management'
+  | 'advanced_analytics'
+  | 'audit_logs'
+  | 'advanced_permissions'
+  | 'custom_branding'
+  | 'custom_integrations'
+  | 'advanced_security'
+  | 'priority_support';
+
+export type QuotaResourceKey = 'branches' | 'terminals' | 'staff' | 'products';
+
+export interface PlanLimits {
+  maxBranches: number | null; // null => custom/unlimited
+  maxTerminals: number | null;
+  maxStaff: number | null;
+  maxProducts: number | null; // null => unlimited under fair use
+  fairUseProductCap?: number;
+}
+
+export interface SubscriptionPlan {
+  planId: PlanId | string;
+  name: string;
+  tagline: string;
+  description: string;
+  currency: string;
+  monthlyPriceMinor: number;
+  annualPriceMinor: number;
+  trialDays: number;
+  gracePeriodDays: number;
+  limits: PlanLimits;
+  features: Record<FeatureKey, boolean>;
+  isCustomPricing?: boolean;
+  sortOrder: number;
+  status: 'active' | 'archived';
+  updatedAt?: unknown;
+}
+
+export interface Tenant {
+  tenantId: string;
+  organizationId: string; // Equals tenantId for backward compatibility with POS collections
+  businessName: string;
+  ownerUid: string;
+  ownerEmail: string;
+  contactPhone?: string;
+  country?: string;
+  currency: string;
+  currencySymbol: string;
+  status: RecordStatus;
+  currentPlanId: string;
+  subscriptionId: string;
+  deploymentMode?: 'shared' | 'dedicated';
+  customDomain?: string;
+  branding?: {
+    primaryColor?: string;
+    logoUrl?: string;
+    receiptTagline?: string;
+  };
+  suspensionReason?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface TenantMembership {
+  membershipId: string; // `${tenantId}_${uid}`
+  tenantId: string;
+  uid: string;
+  email: string;
+  fullName: string;
+  roleId: string;
+  branchIds: string[];
+  defaultBranchId: string;
+  isOwner: boolean;
+  status: AccountStatus;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface PosTerminal {
+  terminalId: string;
+  organizationId: string;
+  branchId: string;
+  terminalCode: string;
+  name: string;
+  deviceLabel?: string;
+  status: RecordStatus;
+  lastActiveAt?: unknown;
+  createdBy: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface TenantSubscription {
+  subscriptionId: string;
+  tenantId: string;
+  planId: string;
+  billingCycle: BillingCycle;
+  status: SubscriptionStatus;
+  trialEndsAt?: string;
+  currentPeriodStart: string;
+  currentPeriodEnd: string;
+  gracePeriodEndsAt?: string;
+  cancelAtPeriodEnd?: boolean;
+  pendingPlanId?: string;
+  pendingBillingCycle?: BillingCycle;
+  paymentProvider: 'paystack' | 'manual' | 'trial';
+  paystackCustomerCode?: string;
+  paystackSubscriptionCode?: string;
+  lastPaymentReference?: string;
+  lastPaymentStatus?: 'succeeded' | 'failed' | 'pending';
+  lastRenewalReminderAt?: string;
+  customLimits?: Partial<PlanLimits>;
+  assignedBy?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface SubscriptionPayment {
+  paymentId: string;
+  tenantId: string;
+  subscriptionId: string;
+  planId: string;
+  billingCycle: BillingCycle;
+  amountMinor: number;
+  currency: string;
+  provider: 'paystack' | 'manual';
+  channel: 'card' | 'mobile_money' | 'bank_transfer' | 'manual';
+  mobileMoneyNetwork?: 'mtn' | 'telecel' | 'airteltigo' | 'unknown';
+  reference: string;
+  paystackTransactionId?: string;
+  status: 'pending' | 'succeeded' | 'failed' | 'refunded';
+  failureReason?: string;
+  initiatedBy?: string;
+  verifiedAt?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface UsageTracking {
+  tenantId: string;
+  branchCount: number;
+  terminalCount: number;
+  staffCount: number;
+  productCount: number;
+  updatedAt?: unknown;
+}
+
+export interface FeatureOverride {
+  overrideId: string;
+  tenantId: string;
+  featureKey?: FeatureKey;
+  enabled?: boolean;
+  limitOverrides?: Partial<PlanLimits>;
+  reason: string;
+  expiresAt: string; // ISO timestamp
+  status: 'active' | 'revoked';
+  grantedBy: string;
+  grantedByEmail?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface PlatformAdmin {
+  uid: string;
+  email: string;
+  fullName: string;
+  role: 'platform_owner' | 'platform_support' | 'billing_admin';
+  isActive: boolean;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface PlatformAuditLog {
+  logId: string;
+  actorUid: string;
+  actorEmail?: string;
+  targetTenantId?: string;
+  action: string;
+  resourceType: string;
+  resourceId: string;
+  details: string;
+  createdAt?: unknown;
+}
+
+export interface SupportTicket {
+  ticketId: string;
+  tenantId: string;
+  tenantName: string;
+  subject: string;
+  category: 'billing' | 'technical' | 'entitlements' | 'onboarding' | 'other';
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  status: 'open' | 'in_progress' | 'resolved' | 'closed';
+  message: string;
+  adminNotes?: string;
+  createdBy: string;
+  createdByEmail?: string;
+  assignedTo?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+

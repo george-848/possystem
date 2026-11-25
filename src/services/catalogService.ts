@@ -8,6 +8,7 @@ import {
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
 import type { Category, Product, StockMovementType } from '../types/pos';
 import { cleanOptional, createNotification, makeId, recordAuditLog } from './auditService';
+import { enforceServerEntitlement } from './saasService';
 
 export async function createCategory(
   organizationId: string,
@@ -96,6 +97,11 @@ export async function createProduct(
   if (input.availableBranchIds && input.availableBranchIds.length === 0) {
     throw new Error('Select at least one branch where this product is available.');
   }
+  await enforceServerEntitlement({
+    organizationId,
+    quotaResource: 'products',
+    increment: 1,
+  });
   const productId = makeId('prd');
   const path = `products/${productId}`;
 

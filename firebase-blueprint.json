@@ -585,11 +585,244 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["keyId", "organizationId", "branchId", "resourceType", "resourceId", "createdAt"]
+    },
+    "Tenant": {
+      "title": "Tenant",
+      "description": "SaaS tenant retail business record linked to its active plan, subscription, and branding.",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessName": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "ownerUid": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerEmail": { "type": "string", "maxLength": 160 },
+        "contactPhone": { "type": "string", "maxLength": 40 },
+        "country": { "type": "string", "maxLength": 80 },
+        "currency": { "type": "string", "minLength": 3, "maxLength": 8 },
+        "currencySymbol": { "type": "string", "minLength": 1, "maxLength": 8 },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "currentPlanId": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "subscriptionId": { "type": "string", "minLength": 2, "maxLength": 128 },
+        "deploymentMode": { "type": "string", "enum": ["shared", "dedicated"] },
+        "customDomain": { "type": "string", "maxLength": 160 },
+        "branding": { "type": "object" },
+        "suspensionReason": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["tenantId", "organizationId", "businessName", "ownerUid", "ownerEmail", "currency", "currencySymbol", "status", "currentPlanId", "subscriptionId", "createdAt", "updatedAt"]
+    },
+    "TenantMembership": {
+      "title": "TenantMembership",
+      "description": "Authoritative user-to-tenant membership mapping role and branch assignments.",
+      "type": "object",
+      "properties": {
+        "membershipId": { "type": "string", "minLength": 3, "maxLength": 260 },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 160 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "roleId": { "type": "string", "minLength": 2, "maxLength": 128 },
+        "branchIds": { "type": "array" },
+        "defaultBranchId": { "type": "string", "maxLength": 128 },
+        "isOwner": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["active", "suspended", "invited"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["membershipId", "tenantId", "uid", "email", "fullName", "roleId", "branchIds", "defaultBranchId", "isOwner", "status", "createdAt", "updatedAt"]
+    },
+    "PosTerminal": {
+      "title": "PosTerminal",
+      "description": "Registered POS terminal/register belonging to a branch for terminal quota enforcement.",
+      "type": "object",
+      "properties": {
+        "terminalId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "terminalCode": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "deviceLabel": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "lastActiveAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string", "minLength": 2, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["terminalId", "organizationId", "branchId", "terminalCode", "name", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "SubscriptionPlan": {
+      "title": "SubscriptionPlan",
+      "description": "Configurable SaaS subscription package definition with pricing, limits, and feature flags.",
+      "type": "object",
+      "properties": {
+        "planId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "tagline": { "type": "string", "maxLength": 160 },
+        "description": { "type": "string", "maxLength": 500 },
+        "currency": { "type": "string", "minLength": 3, "maxLength": 8 },
+        "monthlyPriceMinor": { "type": "number" },
+        "annualPriceMinor": { "type": "number" },
+        "trialDays": { "type": "number" },
+        "gracePeriodDays": { "type": "number" },
+        "limits": { "type": "object" },
+        "features": { "type": "object" },
+        "isCustomPricing": { "type": "boolean" },
+        "sortOrder": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "archived"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["planId", "name", "tagline", "description", "currency", "monthlyPriceMinor", "annualPriceMinor", "trialDays", "gracePeriodDays", "limits", "features", "sortOrder", "status", "updatedAt"]
+    },
+    "TenantSubscription": {
+      "title": "TenantSubscription",
+      "description": "Tenant subscription lifecycle record including trial, billing period, grace period, and pending plan changes.",
+      "type": "object",
+      "properties": {
+        "subscriptionId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "planId": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "billingCycle": { "type": "string", "enum": ["monthly", "annual"] },
+        "status": { "type": "string", "enum": ["trial", "active", "grace_period", "past_due", "expired", "suspended", "cancelled"] },
+        "trialEndsAt": { "type": "string", "maxLength": 64 },
+        "currentPeriodStart": { "type": "string", "maxLength": 64 },
+        "currentPeriodEnd": { "type": "string", "maxLength": 64 },
+        "gracePeriodEndsAt": { "type": "string", "maxLength": 64 },
+        "cancelAtPeriodEnd": { "type": "boolean" },
+        "pendingPlanId": { "type": "string", "maxLength": 64 },
+        "pendingBillingCycle": { "type": "string", "enum": ["monthly", "annual"] },
+        "paymentProvider": { "type": "string", "enum": ["paystack", "manual", "trial"] },
+        "paystackCustomerCode": { "type": "string", "maxLength": 128 },
+        "paystackSubscriptionCode": { "type": "string", "maxLength": 128 },
+        "lastPaymentReference": { "type": "string", "maxLength": 128 },
+        "lastPaymentStatus": { "type": "string", "enum": ["succeeded", "failed", "pending"] },
+        "lastRenewalReminderAt": { "type": "string", "maxLength": 64 },
+        "customLimits": { "type": "object" },
+        "assignedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["subscriptionId", "tenantId", "planId", "billingCycle", "status", "currentPeriodStart", "currentPeriodEnd", "paymentProvider", "createdAt", "updatedAt"]
+    },
+    "SubscriptionPayment": {
+      "title": "SubscriptionPayment",
+      "description": "Server-verified Paystack, Mobile Money, or manual subscription billing transaction record.",
+      "type": "object",
+      "properties": {
+        "paymentId": { "type": "string", "maxLength": 128 },
+        "tenantId": { "type": "string", "maxLength": 128 },
+        "subscriptionId": { "type": "string", "maxLength": 128 },
+        "planId": { "type": "string", "maxLength": 64 },
+        "billingCycle": { "type": "string", "enum": ["monthly", "annual"] },
+        "amountMinor": { "type": "number" },
+        "currency": { "type": "string", "maxLength": 8 },
+        "provider": { "type": "string", "enum": ["paystack", "manual"] },
+        "channel": { "type": "string", "enum": ["card", "mobile_money", "bank_transfer", "manual"] },
+        "mobileMoneyNetwork": { "type": "string", "enum": ["mtn", "telecel", "airteltigo", "unknown"] },
+        "reference": { "type": "string", "maxLength": 128 },
+        "paystackTransactionId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["pending", "succeeded", "failed", "refunded"] },
+        "failureReason": { "type": "string", "maxLength": 300 },
+        "initiatedBy": { "type": "string", "maxLength": 128 },
+        "verifiedAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["paymentId", "tenantId", "subscriptionId", "planId", "billingCycle", "amountMinor", "currency", "provider", "channel", "reference", "status", "createdAt", "updatedAt"]
+    },
+    "UsageTracking": {
+      "title": "UsageTracking",
+      "description": "Real-time tenant resource counters for branches, terminals, staff, and products.",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchCount": { "type": "number" },
+        "terminalCount": { "type": "number" },
+        "staffCount": { "type": "number" },
+        "productCount": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["tenantId", "branchCount", "terminalCount", "staffCount", "productCount", "updatedAt"]
+    },
+    "FeatureOverride": {
+      "title": "FeatureOverride",
+      "description": "Time-bound feature or quota override granted to a tenant by a Platform Super Admin.",
+      "type": "object",
+      "properties": {
+        "overrideId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "featureKey": { "type": "string", "maxLength": 64 },
+        "enabled": { "type": "boolean" },
+        "limitOverrides": { "type": "object" },
+        "reason": { "type": "string", "minLength": 2, "maxLength": 300 },
+        "expiresAt": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "enum": ["active", "revoked"] },
+        "grantedBy": { "type": "string", "minLength": 2, "maxLength": 128 },
+        "grantedByEmail": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["overrideId", "tenantId", "reason", "expiresAt", "status", "grantedBy", "createdAt", "updatedAt"]
+    },
+    "PlatformAdmin": {
+      "title": "PlatformAdmin",
+      "description": "Authorized SaaS platform owner or billing/support administrator.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 160 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "role": { "type": "string", "enum": ["platform_owner", "platform_support", "billing_admin"] },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "fullName", "role", "isActive", "createdAt", "updatedAt"]
+    },
+    "PlatformAuditLog": {
+      "title": "PlatformAuditLog",
+      "description": "Immutable platform-level administrative audit log.",
+      "type": "object",
+      "properties": {
+        "logId": { "type": "string", "maxLength": 128 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorEmail": { "type": "string", "maxLength": 160 },
+        "targetTenantId": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "maxLength": 80 },
+        "resourceType": { "type": "string", "maxLength": 80 },
+        "resourceId": { "type": "string", "maxLength": 128 },
+        "details": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["logId", "actorUid", "action", "resourceType", "resourceId", "details", "createdAt"]
+    },
+    "SupportTicket": {
+      "title": "SupportTicket",
+      "description": "Tenant support request managed via the Platform Super Admin console.",
+      "type": "object",
+      "properties": {
+        "ticketId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "subject": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "category": { "type": "string", "enum": ["billing", "technical", "entitlements", "onboarding", "other"] },
+        "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
+        "status": { "type": "string", "enum": ["open", "in_progress", "resolved", "closed"] },
+        "message": { "type": "string", "minLength": 2, "maxLength": 2000 },
+        "adminNotes": { "type": "string", "maxLength": 2000 },
+        "createdBy": { "type": "string", "minLength": 2, "maxLength": 128 },
+        "createdByEmail": { "type": "string", "maxLength": 160 },
+        "assignedTo": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ticketId", "tenantId", "tenantName", "subject", "category", "priority", "status", "message", "createdBy", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
     "/organizations/{organizationId}": { "schema": { "$ref": "#/entities/Organization" }, "description": "Tenant organization profile and defaults." },
     "/branches/{branchId}": { "schema": { "$ref": "#/entities/Branch" }, "description": "Retail branches owned by an organization." },
+    "/terminals/{terminalId}": { "schema": { "$ref": "#/entities/PosTerminal" }, "description": "POS terminals registered per branch." },
     "/users/{userId}": { "schema": { "$ref": "#/entities/User" }, "description": "Staff accounts, role assignments, branch access, and permission overrides." },
     "/roles/{roleId}": { "schema": { "$ref": "#/entities/Role" }, "description": "Dynamic RBAC roles and permission lists." },
     "/permissions/{permissionId}": { "schema": { "$ref": "#/entities/PermissionDefinition" }, "description": "Configured permission catalog per organization." },
@@ -616,6 +849,16 @@
     "/branchDailySummaries/{summaryId}": { "schema": { "$ref": "#/entities/BranchDailySummary" }, "description": "Daily branch summary rollups." },
     "/systemSettings/{settingId}": { "schema": { "$ref": "#/entities/SystemSettings" }, "description": "Organization-wide system settings and receipt templates." },
     "/notifications/{notificationId}": { "schema": { "$ref": "#/entities/Notification" }, "description": "Targeted branch/org alerts." },
-    "/idempotencyKeys/{keyId}": { "schema": { "$ref": "#/entities/IdempotencyKey" }, "description": "Financial transaction idempotency keys." }
+    "/idempotencyKeys/{keyId}": { "schema": { "$ref": "#/entities/IdempotencyKey" }, "description": "Financial transaction idempotency keys." },
+    "/tenants/{tenantId}": { "schema": { "$ref": "#/entities/Tenant" }, "description": "SaaS tenant business profiles and active plan/subscription pointers." },
+    "/tenantMemberships/{membershipId}": { "schema": { "$ref": "#/entities/TenantMembership" }, "description": "Authoritative user-to-tenant memberships." },
+    "/plans/{planId}": { "schema": { "$ref": "#/entities/SubscriptionPlan" }, "description": "Configurable SaaS subscription plans." },
+    "/subscriptions/{subscriptionId}": { "schema": { "$ref": "#/entities/TenantSubscription" }, "description": "Tenant subscription lifecycle records." },
+    "/subscriptionPayments/{paymentId}": { "schema": { "$ref": "#/entities/SubscriptionPayment" }, "description": "Server-verified Paystack & Mobile Money billing transactions." },
+    "/usageTracking/{tenantId}": { "schema": { "$ref": "#/entities/UsageTracking" }, "description": "Tenant resource usage counters." },
+    "/featureOverrides/{overrideId}": { "schema": { "$ref": "#/entities/FeatureOverride" }, "description": "Temporary tenant feature and quota overrides." },
+    "/platformAdmins/{uid}": { "schema": { "$ref": "#/entities/PlatformAdmin" }, "description": "Authorized SaaS platform administrators." },
+    "/platformAuditLogs/{logId}": { "schema": { "$ref": "#/entities/PlatformAuditLog" }, "description": "Immutable platform administration audit logs." },
+    "/supportTickets/{ticketId}": { "schema": { "$ref": "#/entities/SupportTicket" }, "description": "Tenant support tickets." }
   }
 }
