@@ -49,7 +49,7 @@ export default function BillingPage() {
   const { notify } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const canManageBilling = hasPermission('settings.edit');
+  const canManageBilling = hasPermission('settings.manage');
 
   const [billingCycle, setBillingCycle] = useState<BillingCycle>(
     entitlements.billingCycle || 'monthly'

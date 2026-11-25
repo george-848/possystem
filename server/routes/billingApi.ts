@@ -362,7 +362,7 @@ billingRouter.post(
 billingRouter.post(
   '/billing/checkout',
   requireFirebaseAuth,
-  requireTenantAccess({ permission: 'settings.edit' }),
+  requireTenantAccess({ permission: 'settings.manage' }),
   async (req: AuthenticatedRequest, res: Response) => {
     const parsed = PaystackCheckoutSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -503,7 +503,7 @@ billingRouter.post(
 billingRouter.post(
   '/billing/verify',
   requireFirebaseAuth,
-  requireTenantAccess({ permission: 'settings.edit' }),
+  requireTenantAccess({ permission: 'settings.manage' }),
   async (req: AuthenticatedRequest, res: Response) => {
     const parsed = PaystackVerifySchema.safeParse(req.body);
     if (!parsed.success) {
@@ -598,7 +598,7 @@ billingRouter.post(
 billingRouter.post(
   '/billing/change-plan',
   requireFirebaseAuth,
-  requireTenantAccess({ permission: 'settings.edit' }),
+  requireTenantAccess({ permission: 'settings.manage' }),
   async (req: AuthenticatedRequest, res: Response) => {
     const parsed = PlanChangeSchema.safeParse(req.body);
     if (!parsed.success) {
