@@ -19,6 +19,27 @@ export function formatMoney(minor: number, currencySymbol = 'GH₵'): string {
   return `${isNegative ? '-' : ''}${currencySymbol}${formatted}`;
 }
 
+export function formatTaxRatePercentage(rateBps: number): string {
+  const safeBps = Number.isFinite(rateBps) ? Math.max(0, rateBps) : 0;
+  const pct = safeBps / 100;
+  const formatted = Number.isInteger(pct)
+    ? pct.toString()
+    : Number(pct.toFixed(2)).toString();
+  return `${formatted}%`;
+}
+
+export function formatTaxDisplayValue(params: {
+  taxMinor: number;
+  currencySymbol?: string;
+  defaultTaxRateBps?: number;
+  taxDisplayMode?: 'amount' | 'percentage';
+}): string {
+  if (params.taxDisplayMode === 'percentage') {
+    return formatTaxRatePercentage(params.defaultTaxRateBps ?? 0);
+  }
+  return formatMoney(params.taxMinor, params.currencySymbol || 'GH₵');
+}
+
 export interface CartCalculationInput {
   unitPriceMinor: number;
   costPriceMinor: number;
@@ -27,13 +48,23 @@ export interface CartCalculationInput {
   taxCategory: 'standard' | 'exempt' | 'zero';
 }
 
-export function calculateLineAmounts(item: CartCalculationInput, defaultTaxRateBps: number) {
+export function calculateLineAmounts(
+  item: CartCalculationInput,
+  defaultTaxRateBps: number,
+  taxIncludedInPrice = false
+) {
   const grossMinor = Math.max(0, Math.round(item.unitPriceMinor * item.quantity));
   const clampedDiscount = Math.min(grossMinor, Math.max(0, Math.round(item.discountMinor)));
-  const netBeforeTax = grossMinor - clampedDiscount;
+  const netAfterDiscount = grossMinor - clampedDiscount;
   const rateBps = item.taxCategory === 'standard' ? Math.max(0, defaultTaxRateBps) : 0;
-  const taxMinor = Math.round((netBeforeTax * rateBps) / 10000);
-  const lineTotalMinor = netBeforeTax + taxMinor;
+  const taxMinor =
+    rateBps === 0
+      ? 0
+      : taxIncludedInPrice
+        ? Math.round((netAfterDiscount * rateBps) / (10000 + rateBps))
+        : Math.round((netAfterDiscount * rateBps) / 10000);
+  const netBeforeTax = taxIncludedInPrice ? netAfterDiscount - taxMinor : netAfterDiscount;
+  const lineTotalMinor = taxIncludedInPrice ? netAfterDiscount : netAfterDiscount + taxMinor;
   const cogsMinor = Math.max(0, Math.round(item.costPriceMinor * item.quantity));
   return {
     grossMinor,
@@ -48,7 +79,8 @@ export function calculateLineAmounts(item: CartCalculationInput, defaultTaxRateB
 export function calculateOrderTotals(
   items: CartCalculationInput[],
   orderDiscountMinor: number,
-  defaultTaxRateBps: number
+  defaultTaxRateBps: number,
+  taxIncludedInPrice = false
 ) {
   let subtotalMinor = 0;
   let lineDiscountsMinor = 0;
@@ -56,22 +88,33 @@ export function calculateOrderTotals(
   let taxableBaseMinor = 0;
 
   for (const item of items) {
-    const line = calculateLineAmounts(item, defaultTaxRateBps);
-    subtotalMinor += line.grossMinor;
-    lineDiscountsMinor += line.discountMinor;
-    cogsMinor += line.cogsMinor;
+    const grossMinor = Math.max(0, Math.round(item.unitPriceMinor * item.quantity));
+    const clampedDiscount = Math.min(grossMinor, Math.max(0, Math.round(item.discountMinor)));
+    const netAfterLineDiscount = grossMinor - clampedDiscount;
+    subtotalMinor += grossMinor;
+    lineDiscountsMinor += clampedDiscount;
+    cogsMinor += Math.max(0, Math.round(item.costPriceMinor * item.quantity));
     if (item.taxCategory === 'standard') {
-      taxableBaseMinor += line.netBeforeTax;
+      taxableBaseMinor += netAfterLineDiscount;
     }
   }
 
   const afterLineDiscounts = Math.max(0, subtotalMinor - lineDiscountsMinor);
   const safeOrderDiscount = Math.min(afterLineDiscounts, Math.max(0, Math.round(orderDiscountMinor)));
-  const discountRatio = afterLineDiscounts > 0 ? (afterLineDiscounts - safeOrderDiscount) / afterLineDiscounts : 1;
+  const discountRatio =
+    afterLineDiscounts > 0 ? (afterLineDiscounts - safeOrderDiscount) / afterLineDiscounts : 1;
   const adjustedTaxableBase = Math.round(taxableBaseMinor * discountRatio);
-  const taxMinor = Math.round((adjustedTaxableBase * Math.max(0, defaultTaxRateBps)) / 10000);
+  const rateBps = Math.max(0, defaultTaxRateBps);
+  const taxMinor =
+    rateBps === 0
+      ? 0
+      : taxIncludedInPrice
+        ? Math.round((adjustedTaxableBase * rateBps) / (10000 + rateBps))
+        : Math.round((adjustedTaxableBase * rateBps) / 10000);
   const totalDiscountMinor = lineDiscountsMinor + safeOrderDiscount;
-  const totalMinor = Math.max(0, subtotalMinor - totalDiscountMinor + taxMinor);
+  const totalMinor = taxIncludedInPrice
+    ? Math.max(0, subtotalMinor - totalDiscountMinor)
+    : Math.max(0, subtotalMinor - totalDiscountMinor + taxMinor);
 
   return {
     subtotalMinor,

@@ -56,8 +56,15 @@ apiRouter.post(
       return;
     }
 
-    const { organizationId, branchId, items, orderDiscountMinor, defaultTaxRateBps, payments } =
-      parsed.data;
+    const {
+      organizationId,
+      branchId,
+      items,
+      orderDiscountMinor,
+      defaultTaxRateBps,
+      taxIncludedInPrice,
+      payments,
+    } = parsed.data;
 
     if (req.tenantContext) {
       if (req.tenantContext.tenantId !== organizationId) {
@@ -79,7 +86,12 @@ apiRouter.post(
       }
     }
 
-    const totals = calculateOrderTotals(items, orderDiscountMinor, defaultTaxRateBps);
+    const totals = calculateOrderTotals(
+      items,
+      orderDiscountMinor,
+      defaultTaxRateBps,
+      Boolean(taxIncludedInPrice)
+    );
     const totalPaidMinor = payments.reduce((sum, p) => sum + p.amountMinor, 0);
 
     if (totalPaidMinor < totals.totalMinor) {

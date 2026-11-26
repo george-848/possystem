@@ -173,14 +173,14 @@ export function ProductImportModal({
 
   const loadFile = async (file: File) => {
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
-    if (!['xlsx', 'xls', 'csv', 'ods', 'xlsm'].includes(ext)) {
-      notify('error', 'Unsupported File', 'Please select an Excel (.xlsx, .xls) or CSV (.csv) file.');
+    if (!['xlsx', 'csv'].includes(ext)) {
+      notify('error', 'Unsupported File', 'Please select an Excel (.xlsx) or CSV (.csv) file.');
       return;
     }
 
     try {
       const buffer = await file.arrayBuffer();
-      const parsed = parseSpreadsheetBuffer(buffer, file.name);
+      const parsed = await parseSpreadsheetBuffer(buffer, file.name);
       if (parsed.sheetNames.length === 0) {
         notify('error', 'Empty Workbook', 'No readable sheets were found in this file.');
         return;
@@ -334,7 +334,7 @@ export function ProductImportModal({
               Import Products from Excel or CSV
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Upload `.xlsx`, `.xls`, or `.csv` files, map columns, and validate SKUs before saving.
+              Upload `.xlsx` or `.csv` files, map columns, and validate SKUs before saving.
             </p>
           </div>
           <button
@@ -358,7 +358,7 @@ export function ProductImportModal({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={downloadProductImportXlsxTemplate}
+                onClick={() => void downloadProductImportXlsxTemplate()}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50"
               >
                 <Download className="w-3.5 h-3.5 text-emerald-600" />
@@ -400,12 +400,12 @@ export function ProductImportModal({
                 Drop your Excel or CSV spreadsheet here
               </p>
               <p className="text-xs text-slate-500 mt-1">
-                Supports `.xlsx`, `.xls`, `.csv`, and `.ods` files with header rows
+                Supports `.xlsx` and `.csv` files with header rows
               </p>
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".xlsx,.xls,.csv,.ods,.xlsm"
+                accept=".xlsx,.csv"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   if (file) void loadFile(file);

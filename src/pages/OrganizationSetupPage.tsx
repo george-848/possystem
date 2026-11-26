@@ -2,13 +2,15 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Building2, CheckCircle2, LogOut } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useEntitlements } from '../contexts/EntitlementContext';
 import { useToast } from '../contexts/ToastContext';
-import { DEFAULT_SAAS_PLANS } from '../lib/entitlements';
+import { getIncrementalPlanFeatures } from '../lib/entitlements';
 import { formatMoney } from '../lib/money';
 import { registerTenantBusiness } from '../services/saasService';
 
 export function OrganizationSetupPage() {
   const { firebaseUser, userProfile, logout } = useAuth();
+  const { plans } = useEntitlements();
   const { notify } = useToast();
   const navigate = useNavigate();
 
@@ -31,7 +33,7 @@ export function OrganizationSetupPage() {
   const [seedStarterCategories, setSeedStarterCategories] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
-  const trialPlans = DEFAULT_SAAS_PLANS.filter(
+  const trialPlans = plans.filter(
     (p) => p.planId === 'starter' || p.planId === 'professional'
   );
 
@@ -125,6 +127,7 @@ export function OrganizationSetupPage() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {trialPlans.map((plan) => {
                 const selected = planId === plan.planId;
+                const featureSummary = getIncrementalPlanFeatures(plan, trialPlans);
                 return (
                   <button
                     key={plan.planId}
@@ -147,6 +150,20 @@ export function OrganizationSetupPage() {
                       {plan.limits.maxBranches} branch{plan.limits.maxBranches === 1 ? '' : 'es'} ·{' '}
                       {plan.limits.maxTerminals} POS terminals · {plan.limits.maxStaff} staff
                     </p>
+                    <div className="mt-2.5 pt-2 border-t border-slate-200/70 space-y-1">
+                      {featureSummary.includedFromPlanName && (
+                        <p className="text-[11px] font-semibold text-emerald-700">
+                          All in {featureSummary.includedFromPlanName}
+                          {featureSummary.additionalFeatures.length > 0 ? ', plus:' : ''}
+                        </p>
+                      )}
+                      {featureSummary.additionalFeatures.map((feat) => (
+                        <p key={feat.key} className="text-[11px] text-slate-600 flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                          <span>{feat.label}</span>
+                        </p>
+                      ))}
+                    </div>
                   </button>
                 );
               })}

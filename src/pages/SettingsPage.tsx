@@ -1,5 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, Save, Server, Settings as SettingsIcon } from 'lucide-react';
+import {
+  Building2,
+  CheckCircle2,
+  ImagePlus,
+  Save,
+  Server,
+  Settings as SettingsIcon,
+  Trash2,
+} from 'lucide-react';
 import { BarcodePrintTab } from '../components/BarcodePrintTab';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -8,9 +16,10 @@ import {
   DEFAULT_RECEIPT_VISIBLE_FIELDS,
   RECEIPT_FIELD_OPTIONS,
 } from '../lib/receiptConfig';
+import { sanitizeImageSrc } from '../lib/url';
 import { apiRequest } from '../services/auditService';
 import { updateOrganization, updateSystemSettings } from '../services/orgService';
-import type { ReceiptFieldKey, SinglePaymentMethod } from '../types/pos';
+import type { ReceiptFieldKey, SinglePaymentMethod, TaxDisplayMode } from '../types/pos';
 
 interface ArchStage {
   stage: number;
@@ -30,6 +39,8 @@ export default function SettingsPage() {
   // Organization settings
   const [businessName, setBusinessName] = useState('');
   const [registrationNumber, setRegistrationNumber] = useState('');
+  const [logoUrl, setLogoUrl] = useState('');
+  const [logoPreviewError, setLogoPreviewError] = useState(false);
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
@@ -56,6 +67,8 @@ export default function SettingsPage() {
   const [expenseApprovalLimitStr, setExpenseApprovalLimitStr] = useState('500.00');
   const [refundWindowDays, setRefundWindowDays] = useState('7');
   const [lowStockNotificationsEnabled, setLowStockNotificationsEnabled] = useState(true);
+  const [taxIncludedInPrice, setTaxIncludedInPrice] = useState(false);
+  const [taxDisplayMode, setTaxDisplayMode] = useState<TaxDisplayMode>('amount');
 
   // Architecture status from Express backend
   const [archStages, setArchStages] = useState<ArchStage[]>([]);
@@ -64,6 +77,8 @@ export default function SettingsPage() {
     if (!organization) return;
     setBusinessName(organization.businessName);
     setRegistrationNumber(organization.registrationNumber || '');
+    setLogoUrl(organization.logoUrl || '');
+    setLogoPreviewError(false);
     setEmail(organization.email || '');
     setPhone(organization.phone || '');
     setAddress(organization.address || '');
@@ -87,6 +102,8 @@ export default function SettingsPage() {
     setExpenseApprovalLimitStr((systemSettings.expenseApprovalLimitMinor / 100).toFixed(2));
     setRefundWindowDays(String(systemSettings.refundWindowDays));
     setLowStockNotificationsEnabled(systemSettings.lowStockNotificationsEnabled);
+    setTaxIncludedInPrice(Boolean(systemSettings.taxIncludedInPrice));
+    setTaxDisplayMode(systemSettings.taxDisplayMode === 'percentage' ? 'percentage' : 'amount');
   }, [systemSettings]);
 
   useEffect(() => {
@@ -95,6 +112,58 @@ export default function SettingsPage() {
       .then((res) => setArchStages(res.architecture?.stages || []))
       .catch(() => {});
   }, [tab]);
+
+  const handleLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      notify('error', 'Unsupported Image Format', 'Please upload a PNG, JPEG, or WebP logo file.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 220;
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const targetW = Math.max(1, Math.round(img.width * scale));
+        const targetH = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+
+        let encoded = canvas.toDataURL('image/png');
+        if (encoded.length > 60000) {
+          encoded = canvas.toDataURL('image/webp', 0.85);
+        }
+        if (encoded.length > 60000) {
+          encoded = canvas.toDataURL('image/jpeg', 0.82);
+        }
+        if (encoded.length > 64000) {
+          notify(
+            'error',
+            'Logo Too Large',
+            'Even after compression the image exceeds 64KB. Please choose a simpler logo image.'
+          );
+          return;
+        }
+        setLogoUrl(encoded);
+        setLogoPreviewError(false);
+        notify('info', 'Logo Ready', 'Click "Save Organization Settings" to publish your logo.');
+      };
+      img.onerror = () => {
+        notify('error', 'Invalid Image', 'Could not decode the selected image file.');
+      };
+      img.src = String(reader.result || '');
+    };
+    reader.readAsDataURL(file);
+  };
 
   const handleSaveOrg = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -106,6 +175,7 @@ export default function SettingsPage() {
       await updateOrganization(organization.organizationId, {
         businessName: businessName.trim(),
         registrationNumber: registrationNumber.trim(),
+        logoUrl: logoUrl.trim(),
         email: email.trim(),
         phone: phone.trim(),
         address: address.trim(),
@@ -115,7 +185,28 @@ export default function SettingsPage() {
         taxLabel: taxLabel.trim() || 'VAT',
         allowNegativeInventory,
       });
-      notify('success', 'Organization Settings Saved', 'Tax, currency, and inventory rules updated.');
+
+      if (
+        systemSettings &&
+        (Boolean(systemSettings.taxIncludedInPrice) !== taxIncludedInPrice ||
+          (systemSettings.taxDisplayMode || 'amount') !== taxDisplayMode)
+      ) {
+        await updateSystemSettings(systemSettings.settingId, organization.organizationId, {
+          receiptHeader: receiptHeader.trim() || `${businessName.trim() || organization.businessName} Receipt`,
+          receiptFooter: receiptFooter.trim() || 'Thank you for your business.',
+          returnPolicy: returnPolicy.trim() || undefined,
+          receiptVisibleFields,
+          supportedPaymentMethods: paymentMethods,
+          maxCashierDiscountPct: Math.max(0, Math.min(100, Number(maxCashierDiscountPct) || 0)),
+          expenseApprovalLimitMinor: Math.max(0, toMinorUnits(expenseApprovalLimitStr)),
+          refundWindowDays: Math.max(0, Math.min(365, Number(refundWindowDays) || 7)),
+          lowStockNotificationsEnabled,
+          taxIncludedInPrice,
+          taxDisplayMode,
+        });
+      }
+
+      notify('success', 'Organization Settings Saved', 'Logo, tax, currency, and inventory rules updated.');
     } catch (err) {
       notify('error', 'Save Failed', err instanceof Error ? err.message : 'Unable to save settings.');
     } finally {
@@ -156,14 +247,18 @@ export default function SettingsPage() {
         expenseApprovalLimitMinor: Math.max(0, toMinorUnits(expenseApprovalLimitStr)),
         refundWindowDays: Math.max(0, Math.min(365, Number(refundWindowDays) || 7)),
         lowStockNotificationsEnabled,
+        taxIncludedInPrice,
+        taxDisplayMode,
       });
-      notify('success', 'System Policies Saved', 'Receipt templates, visible fields, and operational limits updated.');
+      notify('success', 'System Policies Saved', 'Tax calculation mode, receipt templates, and limits updated.');
     } catch (err) {
       notify('error', 'Save Failed', err instanceof Error ? err.message : 'Unable to save policies.');
     } finally {
       setSaving(false);
     }
   };
+
+  const safePreviewLogo = sanitizeImageSrc(logoUrl);
 
   return (
     <div className="space-y-6">
@@ -228,7 +323,76 @@ export default function SettingsPage() {
         >
           <div className="flex items-center gap-2 border-b border-slate-200 pb-3 mb-2">
             <SettingsIcon className="w-4 h-4 text-emerald-600" />
-            <h3 className="text-sm font-bold text-slate-900">Business Identity & Financial Rules</h3>
+            <h3 className="text-sm font-bold text-slate-900">Business Identity, Logo &amp; Financial Rules</h3>
+          </div>
+
+          {/* Organization Logo Upload & URL */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4 flex flex-col sm:flex-row sm:items-center gap-4">
+            <div className="w-16 h-16 rounded-xl border border-slate-200 bg-white flex items-center justify-center overflow-hidden shrink-0">
+              {safePreviewLogo && !logoPreviewError ? (
+                <img
+                  src={safePreviewLogo}
+                  alt={businessName || 'Organization Logo'}
+                  referrerPolicy="no-referrer"
+                  onError={() => setLogoPreviewError(true)}
+                  className="w-full h-full object-contain p-1"
+                />
+              ) : (
+                <Building2 className="w-7 h-7 text-slate-400" />
+              )}
+            </div>
+            <div className="flex-1 min-w-0 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-slate-800">Organization Logo</p>
+                  <p className="text-[11px] text-slate-500">
+                    Displayed in the workspace sidebar, printed sales receipts, and EOD closing reports.
+                  </p>
+                </div>
+                {canManage && (
+                  <div className="flex items-center gap-2">
+                    <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer">
+                      <ImagePlus className="w-3.5 h-3.5 text-emerald-600" />
+                      Upload Logo
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={handleLogoFileChange}
+                        className="sr-only"
+                      />
+                    </label>
+                    {logoUrl && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLogoUrl('');
+                          setLogoPreviewError(false);
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-rose-200 bg-white text-xs font-medium text-rose-700 hover:bg-rose-50"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+              <input
+                type="text"
+                disabled={!canManage}
+                value={logoUrl.startsWith('data:') ? '' : logoUrl}
+                onChange={(e) => {
+                  setLogoUrl(e.target.value);
+                  setLogoPreviewError(false);
+                }}
+                placeholder={
+                  logoUrl.startsWith('data:')
+                    ? 'Uploaded image ready (or paste an https:// image URL to replace)'
+                    : 'Or paste a public https:// logo image URL...'
+                }
+                className="w-full px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white disabled:bg-slate-100"
+              />
+            </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -340,16 +504,80 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          <label className="flex items-center gap-2.5 pt-2 text-sm text-slate-800">
-            <input
-              type="checkbox"
-              disabled={!canManage}
-              checked={allowNegativeInventory}
-              onChange={(e) => setAllowNegativeInventory(e.target.checked)}
-              className="rounded border-slate-300 text-emerald-600"
-            />
-            <span>Allow Negative Inventory on POS Checkout (off by default to prevent overselling)</span>
-          </label>
+          <div className="space-y-2.5 pt-2">
+            <label className="flex items-start gap-2.5 text-sm text-slate-800 cursor-pointer">
+              <input
+                type="checkbox"
+                disabled={!canManage}
+                checked={taxIncludedInPrice}
+                onChange={(e) => setTaxIncludedInPrice(e.target.checked)}
+                className="mt-1 rounded border-slate-300 text-emerald-600"
+              />
+              <span>
+                <span className="font-medium block">
+                  Deduct tax from actual product price (Tax-Inclusive Pricing)
+                </span>
+                <span className="text-xs text-slate-500">
+                  When checked, {taxLabel || 'VAT'} ({taxRatePct || '0'}%) is extracted from the product&apos;s selling price instead of added on top at checkout.
+                </span>
+              </span>
+            </label>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3.5 space-y-2">
+              <p className="text-xs font-semibold text-slate-800">
+                Receipt &amp; Checkout Tax Display Format
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <label className="flex items-start gap-2 p-2.5 rounded-lg border border-slate-200 bg-white text-xs cursor-pointer">
+                  <input
+                    type="radio"
+                    name="org-tax-display-mode"
+                    disabled={!canManage}
+                    checked={taxDisplayMode === 'amount'}
+                    onChange={() => setTaxDisplayMode('amount')}
+                    className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <span>
+                    <span className="font-semibold text-slate-900 block">
+                      Display Tax Amount
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      e.g. {taxLabel || 'VAT'}: {currencySymbol || 'GH₵'}15.00
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2 p-2.5 rounded-lg border border-slate-200 bg-white text-xs cursor-pointer">
+                  <input
+                    type="radio"
+                    name="org-tax-display-mode"
+                    disabled={!canManage}
+                    checked={taxDisplayMode === 'percentage'}
+                    onChange={() => setTaxDisplayMode('percentage')}
+                    className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <span>
+                    <span className="font-semibold text-slate-900 block">
+                      Display Tax Rate Percentage Only
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      e.g. {taxLabel || 'VAT'}: {taxRatePct || '0'}%
+                    </span>
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2.5 text-sm text-slate-800 cursor-pointer">
+              <input
+                type="checkbox"
+                disabled={!canManage}
+                checked={allowNegativeInventory}
+                onChange={(e) => setAllowNegativeInventory(e.target.checked)}
+                className="rounded border-slate-300 text-emerald-600"
+              />
+              <span>Allow Negative Inventory on POS Checkout (off by default to prevent overselling)</span>
+            </label>
+          </div>
 
           {canManage && (
             <div className="pt-3 flex justify-end">
@@ -543,15 +771,79 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          <label className="flex items-center gap-2.5 text-sm text-slate-800">
-            <input
-              type="checkbox"
-              disabled={!canManage}
-              checked={lowStockNotificationsEnabled}
-              onChange={(e) => setLowStockNotificationsEnabled(e.target.checked)}
-            />
-            <span>Emit Low-Stock Notifications Automatically on Checkout / Adjustments</span>
-          </label>
+          <div className="border-t border-slate-200 pt-4 space-y-3">
+            <label className="flex items-start gap-2.5 p-3 rounded-lg border border-slate-200 bg-slate-50/70 text-sm text-slate-800 cursor-pointer">
+              <input
+                type="checkbox"
+                disabled={!canManage}
+                checked={taxIncludedInPrice}
+                onChange={(e) => setTaxIncludedInPrice(e.target.checked)}
+                className="mt-1 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+              />
+              <span>
+                <span className="font-semibold text-slate-900 block text-xs">
+                  Deduct Tax From Actual Product Price (Tax-Inclusive Mode)
+                </span>
+                <span className="block text-[11px] text-slate-600 mt-0.5">
+                  Checked: product selling price already includes {taxLabel || 'VAT'} ({taxRatePct || '0'}%), so tax is deducted/extracted from that price without increasing the customer&apos;s total. Unchecked: tax is added on top of the product price.
+                </span>
+              </span>
+            </label>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 space-y-2">
+              <p className="text-xs font-semibold text-slate-900">
+                Tax Display Mode on POS Checkout, Receipts &amp; Closing Reports
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <label className="flex items-start gap-2 p-2.5 rounded-lg border border-slate-200 bg-white text-xs cursor-pointer">
+                  <input
+                    type="radio"
+                    name="pos-tax-display-mode"
+                    disabled={!canManage}
+                    checked={taxDisplayMode === 'amount'}
+                    onChange={() => setTaxDisplayMode('amount')}
+                    className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <span>
+                    <span className="font-semibold text-slate-900 block">
+                      Show Tax Rate Amount
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      Displays calculated currency amount ({currencySymbol || 'GH₵'}15.00)
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2 p-2.5 rounded-lg border border-slate-200 bg-white text-xs cursor-pointer">
+                  <input
+                    type="radio"
+                    name="pos-tax-display-mode"
+                    disabled={!canManage}
+                    checked={taxDisplayMode === 'percentage'}
+                    onChange={() => setTaxDisplayMode('percentage')}
+                    className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <span>
+                    <span className="font-semibold text-slate-900 block">
+                      Show Tax Rate Percentage Only
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      Displays configured rate percentage ({taxRatePct || '0'}%)
+                    </span>
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2.5 text-sm text-slate-800 cursor-pointer">
+              <input
+                type="checkbox"
+                disabled={!canManage}
+                checked={lowStockNotificationsEnabled}
+                onChange={(e) => setLowStockNotificationsEnabled(e.target.checked)}
+              />
+              <span>Emit Low-Stock Notifications Automatically on Checkout / Adjustments</span>
+            </label>
+          </div>
 
           {canManage && (
             <div className="pt-3 flex justify-end">

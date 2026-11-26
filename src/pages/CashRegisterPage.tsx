@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { CheckCircle2, Lock, Plus, Wallet } from 'lucide-react';
+import { CheckCircle2, Lock, Plus, Printer, Wallet } from 'lucide-react';
+import { CashClosingReportModal } from '../components/CashClosingReportModal';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
 import { useToast } from '../contexts/ToastContext';
@@ -10,10 +11,18 @@ import {
   openCashSession,
   recordCashMovement,
 } from '../services/operationsService';
+import type { CashSession } from '../types/pos';
 
 export function CashRegisterPage() {
-  const { userProfile, organization, activeBranchId, activeBranch, hasPermission } = useAuth();
-  const { cashSessions } = useData();
+  const {
+    userProfile,
+    organization,
+    systemSettings,
+    activeBranchId,
+    activeBranch,
+    hasPermission,
+  } = useAuth();
+  const { cashSessions, sales, refunds } = useData();
   const { notify } = useToast();
 
   const [openingFloatStr, setOpeningFloatStr] = useState('0');
@@ -22,6 +31,7 @@ export function CashRegisterPage() {
   const [moveAmtStr, setMoveAmtStr] = useState('');
   const [moveNotes, setMoveNotes] = useState('');
   const [busy, setBusy] = useState(false);
+  const [reportSession, setReportSession] = useState<CashSession | null>(null);
 
   const sym = organization?.currencySymbol || 'GH₵';
   const canOpen = hasPermission('cashSessions.open');
@@ -91,11 +101,13 @@ export function CashRegisterPage() {
     if (!organization || !activeBranchId || !myOpenSession) return;
     setBusy(true);
     try {
+      const actualMinor = toMinorUnits(closingCountStr);
+      const closingSnapshotBase = { ...myOpenSession };
       const res = await closeCashSession({
         sessionId: myOpenSession.sessionId,
         organizationId: organization.organizationId,
         branchId: activeBranchId,
-        actualClosingBalanceMinor: toMinorUnits(closingCountStr),
+        actualClosingBalanceMinor: actualMinor,
       });
       notify(
         res.differenceMinor === 0 ? 'success' : 'info',
@@ -103,6 +115,13 @@ export function CashRegisterPage() {
         `Variance: ${formatMoney(res.differenceMinor, sym)}`
       );
       setClosingCountStr('');
+      setReportSession({
+        ...closingSnapshotBase,
+        actualClosingBalanceMinor: actualMinor,
+        differenceMinor: res.differenceMinor,
+        status: 'closed',
+        closedAt: new Date(),
+      });
     } catch (err) {
       notify('error', 'Close Failed', err instanceof Error ? err.message : 'Unable to close shift');
     } finally {
@@ -224,7 +243,7 @@ export function CashRegisterPage() {
                 <h3 className="text-sm font-semibold text-slate-900">Close Cash Shift</h3>
               </div>
               <p className="text-xs text-slate-500">
-                Count physical cash in the drawer. Closed shifts are locked against editing.
+                Count physical cash in the drawer. After closing, you can print the End-of-Day report.
               </p>
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -303,7 +322,7 @@ export function CashRegisterPage() {
                 <th className="text-right px-5 py-2.5 font-medium">Actual</th>
                 <th className="text-right px-5 py-2.5 font-medium">Variance</th>
                 <th className="text-left px-5 py-2.5 font-medium">Status</th>
-                <th className="text-right px-5 py-2.5 font-medium">Approval</th>
+                <th className="text-right px-5 py-2.5 font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -339,26 +358,40 @@ export function CashRegisterPage() {
                     {cs.status}
                   </td>
                   <td className="px-5 py-3 text-right">
-                    {cs.status === 'closed' && canApprove ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void approveCashSession(
-                            cs.sessionId,
-                            cs.organizationId,
-                            cs.branchId
-                          ).then(() => notify('success', 'Shift Approved', 'Cash session signed off.'))
-                        }
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700"
-                      >
-                        <CheckCircle2 className="w-3 h-3" />
-                        Approve
-                      </button>
-                    ) : (
-                      <span className="text-xs text-slate-400">
-                        {cs.status === 'approved' ? 'Approved' : '—'}
-                      </span>
-                    )}
+                    <div className="inline-flex items-center justify-end gap-1.5">
+                      {(cs.status === 'closed' || cs.status === 'approved') && (
+                        <button
+                          type="button"
+                          onClick={() => setReportSession(cs)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+                        >
+                          <Printer className="w-3 h-3" />
+                          Print EOD
+                        </button>
+                      )}
+                      {cs.status === 'closed' && canApprove ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void approveCashSession(
+                              cs.sessionId,
+                              cs.organizationId,
+                              cs.branchId
+                            ).then(() =>
+                              notify('success', 'Shift Approved', 'Cash session signed off.')
+                            )
+                          }
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700 whitespace-nowrap"
+                        >
+                          <CheckCircle2 className="w-3 h-3" />
+                          Approve
+                        </button>
+                      ) : cs.status === 'approved' ? (
+                        <span className="text-xs text-slate-400">Approved</span>
+                      ) : cs.status === 'open' ? (
+                        <span className="text-xs text-slate-400">—</span>
+                      ) : null}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -373,6 +406,17 @@ export function CashRegisterPage() {
           </table>
         </div>
       </div>
+
+      <CashClosingReportModal
+        open={Boolean(reportSession)}
+        onClose={() => setReportSession(null)}
+        session={reportSession}
+        organization={organization}
+        branch={activeBranch}
+        settings={systemSettings}
+        sales={sales}
+        refunds={refunds}
+      />
     </div>
   );
 }

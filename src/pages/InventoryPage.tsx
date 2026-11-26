@@ -1,13 +1,40 @@
 import React, { useMemo, useState } from 'react';
-import { AlertTriangle, ArrowDownUp, Boxes, Download, Plus, Search, X } from 'lucide-react';
+import {
+  AlertCircle,
+  AlertTriangle,
+  ArrowDownUp,
+  Boxes,
+  Download,
+  Layers,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
 import { useToast } from '../contexts/ToastContext';
 import { downloadCsvFile } from '../lib/csv';
 import { isProductAvailableAtBranch } from '../lib/barcode';
 import { formatDateTime, formatMoney, getDateKey } from '../lib/money';
-import { adjustBranchInventory } from '../services/catalogService';
+import {
+  adjustBranchInventory,
+  bulkAdjustBranchInventory,
+} from '../services/catalogService';
 import type { StockMovementType } from '../types/pos';
+
+interface BulkAdjustRowState {
+  productId: string;
+  productName: string;
+  sku: string;
+  unit: string;
+  currentQty: number;
+  costPriceMinor: number;
+  sellingPriceMinor: number;
+  movementType: StockMovementType;
+  qtyInput: string;
+  reorderInput: string;
+}
 
 export function InventoryPage() {
   const { organization, activeBranchId, activeBranch, hasPermission } = useAuth();
@@ -26,6 +53,15 @@ export function InventoryPage() {
   const [adjReorder, setAdjReorder] = useState('5');
   const [adjReason, setAdjReason] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // Bulk Stock Adjustment Modal
+  const [showBulkAdjust, setShowBulkAdjust] = useState(false);
+  const [bulkRows, setBulkRows] = useState<BulkAdjustRowState[]>([]);
+  const [bulkGlobalMode, setBulkGlobalMode] = useState<StockMovementType>('adjustment_add');
+  const [bulkReason, setBulkReason] = useState('');
+  const [bulkAddProductId, setBulkAddProductId] = useState('');
+  const [bulkSearch, setBulkSearch] = useState('');
+  const [bulkSaving, setBulkSaving] = useState(false);
 
   const sym = organization?.currencySymbol || 'GH₵';
   const currencyCode = organization?.currency || sym;
@@ -207,6 +243,184 @@ export function InventoryPage() {
     }
   };
 
+  const toBulkRowState = (
+    row: (typeof allBranchStockRows)[number],
+    mode: StockMovementType
+  ): BulkAdjustRowState => ({
+    productId: row.product.productId,
+    productName: row.product.name,
+    sku: row.product.sku,
+    unit: row.product.unit || 'pcs',
+    currentQty: row.qty,
+    costPriceMinor: row.costMinor,
+    sellingPriceMinor: row.sellMinor,
+    movementType: mode,
+    qtyInput: mode === 'stock_count' ? String(row.qty) : '0',
+    reorderInput: String(row.reorder),
+  });
+
+  const openBulkAdjustModal = () => {
+    const initialSource =
+      currentBranchStock.length > 0 ? currentBranchStock : allBranchStockRows;
+    const defaultMode: StockMovementType = 'adjustment_add';
+    setBulkGlobalMode(defaultMode);
+    setBulkRows(initialSource.slice(0, 25).map((r) => toBulkRowState(r, defaultMode)));
+    setBulkAddProductId(allBranchStockRows[0]?.product.productId || '');
+    setBulkReason('');
+    setBulkSearch('');
+    setShowBulkAdjust(true);
+  };
+
+  const bulkSelectedIds = useMemo(
+    () => new Set(bulkRows.map((r) => r.productId)),
+    [bulkRows]
+  );
+
+  const availableBulkCandidates = useMemo(() => {
+    const q = bulkSearch.trim().toLowerCase();
+    return allBranchStockRows.filter((row) => {
+      if (bulkSelectedIds.has(row.product.productId)) return false;
+      if (!q) return true;
+      return (
+        row.product.name.toLowerCase().includes(q) ||
+        row.product.sku.toLowerCase().includes(q) ||
+        Boolean(row.product.barcode?.toLowerCase().includes(q))
+      );
+    });
+  }, [allBranchStockRows, bulkSelectedIds, bulkSearch]);
+
+  const computeBulkNextQty = (row: BulkAdjustRowState): number => {
+    const num = Math.max(0, Number.parseInt(row.qtyInput || '0', 10) || 0);
+    if (row.movementType === 'stock_count') return num;
+    if (row.movementType === 'adjustment_add') return row.currentQty + num;
+    return row.currentQty - num;
+  };
+
+  const allowNegativeStock = Boolean(organization?.allowNegativeInventory);
+
+  const negativeViolationsCount = useMemo(() => {
+    if (allowNegativeStock) return 0;
+    return bulkRows.filter((row) => computeBulkNextQty(row) < 0).length;
+  }, [allowNegativeStock, bulkRows]);
+
+  const handleBulkAddSingleProduct = () => {
+    const targetId = bulkAddProductId || availableBulkCandidates[0]?.product.productId;
+    if (!targetId) return;
+    const match = allBranchStockRows.find((r) => r.product.productId === targetId);
+    if (!match || bulkSelectedIds.has(match.product.productId)) return;
+    setBulkRows((prev) => [...prev, toBulkRowState(match, bulkGlobalMode)]);
+  };
+
+  const handleBulkLoadSubset = (subset: 'low' | 'filtered') => {
+    const source =
+      subset === 'low'
+        ? allBranchStockRows.filter((r) => r.isLow)
+        : currentBranchStock;
+    if (source.length === 0) {
+      notify(
+        'info',
+        'No Matching Items',
+        subset === 'low'
+          ? 'No low-stock products found at this branch.'
+          : 'No products match the current inventory filter.'
+      );
+      return;
+    }
+    setBulkRows((prev) => {
+      const existing = new Set(prev.map((r) => r.productId));
+      const additions = source
+        .filter((s) => !existing.has(s.product.productId))
+        .map((s) => toBulkRowState(s, bulkGlobalMode));
+      return [...prev, ...additions];
+    });
+  };
+
+  const handleBulkApplyModeToAll = () => {
+    setBulkRows((prev) =>
+      prev.map((r) => ({
+        ...r,
+        movementType: bulkGlobalMode,
+        qtyInput:
+          bulkGlobalMode === 'stock_count'
+            ? String(r.currentQty)
+            : r.qtyInput,
+      }))
+    );
+  };
+
+  const handleBulkSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!organization || !activeBranchId) return;
+    if (bulkRows.length === 0) {
+      notify('error', 'No Items Selected', 'Add at least one product to adjust in bulk.');
+      return;
+    }
+    if (negativeViolationsCount > 0) {
+      notify(
+        'error',
+        'Negative Stock Prevented',
+        `${negativeViolationsCount} item(s) would drop below 0 while negative inventory is disabled.`
+      );
+      return;
+    }
+
+    setBulkSaving(true);
+    try {
+      const res = await bulkAdjustBranchInventory({
+        organizationId: organization.organizationId,
+        branchId: activeBranchId,
+        reason: bulkReason,
+        items: bulkRows.map((row) => {
+          const numericQty = Math.max(0, Number.parseInt(row.qtyInput || '0', 10) || 0);
+          const reorder = Math.max(0, Number.parseInt(row.reorderInput || '0', 10) || 0);
+          const delta =
+            row.movementType === 'adjustment_add'
+              ? numericQty
+              : row.movementType === 'stock_count'
+                ? 0
+                : -numericQty;
+
+          return {
+            productId: row.productId,
+            productName: row.productName,
+            sku: row.sku,
+            movementType: row.movementType,
+            quantityDelta: delta,
+            setExactQuantity: row.movementType === 'stock_count' ? numericQty : undefined,
+            reorderLevel: reorder,
+            costPriceMinor: row.costPriceMinor,
+            sellingPriceMinor: row.sellingPriceMinor,
+          };
+        }),
+      });
+
+      if (res.failedItems.length === 0) {
+        notify(
+          'success',
+          'Bulk Adjustment Recorded',
+          `Updated ${res.updatedCount} item(s)${res.lowStockCount > 0 ? ` · ${res.lowStockCount} low-stock alert(s)` : ''}.`
+        );
+        setShowBulkAdjust(false);
+      } else {
+        const failedIds = new Set(res.failedItems.map((f) => f.productId));
+        setBulkRows((prev) => prev.filter((r) => failedIds.has(r.productId)));
+        notify(
+          res.updatedCount > 0 ? 'info' : 'error',
+          'Partial Bulk Adjustment',
+          `Updated ${res.updatedCount} item(s); ${res.failedItems.length} failed (${res.failedItems[0]?.error}).`
+        );
+      }
+    } catch (err) {
+      notify(
+        'error',
+        'Bulk Adjustment Failed',
+        err instanceof Error ? err.message : 'Unable to complete bulk stock adjustment.'
+      );
+    } finally {
+      setBulkSaving(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -252,19 +466,29 @@ export function InventoryPage() {
             </button>
           )}
           {canAdjust && allBranchStockRows.length > 0 && (
-            <button
-              type="button"
-              onClick={() => {
-                const firstRow = allBranchStockRows[0];
-                if (firstRow) {
-                  openAdjustFor(firstRow.product.productId, firstRow.reorder);
-                }
-              }}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              Adjust Stock
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={openBulkAdjustModal}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                Bulk Adjust
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const firstRow = allBranchStockRows[0];
+                  if (firstRow) {
+                    openAdjustFor(firstRow.product.productId, firstRow.reorder);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700 whitespace-nowrap"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Adjust Stock
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -623,6 +847,318 @@ export function InventoryPage() {
               >
                 {saving ? 'Recording...' : 'Record Movement'}
               </button>
+            </div>
+          </form>
+        </div>
+      )}
+      {/* Bulk Stock Adjustment Modal */}
+      {showBulkAdjust && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 p-4"
+          onClick={() => !bulkSaving && setShowBulkAdjust(false)}
+        >
+          <form
+            onSubmit={(e) => void handleBulkSubmit(e)}
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white border border-slate-200 rounded-xl max-w-5xl w-full max-h-[92vh] flex flex-col shadow-2xl overflow-hidden"
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 bg-slate-50/70">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                  <Layers className="w-4 h-4" />
+                </span>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-bold text-slate-900 truncate">
+                    Bulk Stock Adjustment — {activeBranch?.branchName} ({activeBranch?.branchCode})
+                  </h3>
+                  <p className="text-[11px] text-slate-500 truncate">
+                    Adjust stock levels and reorder thresholds across multiple products in a single audit batch
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={bulkSaving}
+                onClick={() => setShowBulkAdjust(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Toolbar & Audit Reason */}
+            <div className="px-5 py-3.5 border-b border-slate-200 bg-white space-y-3">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5">
+                <div className="lg:col-span-5 flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleBulkLoadSubset('low')}
+                    className="px-2.5 py-1.5 text-xs font-medium rounded-lg border border-amber-200 bg-amber-50 text-amber-900 hover:bg-amber-100"
+                  >
+                    Add Low-Stock ({stockStats.lowCount})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleBulkLoadSubset('filtered')}
+                    className="px-2.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                  >
+                    Add Filtered ({currentBranchStock.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBulkRows([])}
+                    className="px-2.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                  >
+                    Clear List
+                  </button>
+                </div>
+
+                <div className="lg:col-span-7 flex flex-wrap items-center gap-2 lg:justify-end">
+                  <select
+                    value={bulkGlobalMode}
+                    onChange={(e) => setBulkGlobalMode(e.target.value as StockMovementType)}
+                    className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg bg-white text-slate-800"
+                  >
+                    <option value="adjustment_add">Add Stock (+)</option>
+                    <option value="adjustment_reduce">Reduce Stock (-)</option>
+                    <option value="stock_count">Physical Count (=)</option>
+                    <option value="damaged">Damaged (-)</option>
+                    <option value="expired">Expired (-)</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleBulkApplyModeToAll}
+                    disabled={bulkRows.length === 0}
+                    className="px-2.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                  >
+                    Apply Mode to All
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5">
+                <div className="lg:col-span-7 flex flex-wrap sm:flex-nowrap items-center gap-2">
+                  <input
+                    type="text"
+                    value={bulkSearch}
+                    onChange={(e) => setBulkSearch(e.target.value)}
+                    placeholder="Filter products to add..."
+                    className="w-full sm:w-44 px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg"
+                  />
+                  <select
+                    value={
+                      availableBulkCandidates.some((c) => c.product.productId === bulkAddProductId)
+                        ? bulkAddProductId
+                        : availableBulkCandidates[0]?.product.productId || ''
+                    }
+                    onChange={(e) => setBulkAddProductId(e.target.value)}
+                    disabled={availableBulkCandidates.length === 0}
+                    className="flex-1 min-w-[180px] px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg bg-white"
+                  >
+                    {availableBulkCandidates.length === 0 ? (
+                      <option value="">All matching branch products added</option>
+                    ) : (
+                      availableBulkCandidates.map((row) => (
+                        <option key={row.product.productId} value={row.product.productId}>
+                          {row.product.name} ({row.product.sku}) · Qty {row.qty}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleBulkAddSingleProduct}
+                    disabled={availableBulkCandidates.length === 0}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Add Item
+                  </button>
+                </div>
+
+                <div className="lg:col-span-5">
+                  <input
+                    type="text"
+                    required
+                    value={bulkReason}
+                    onChange={(e) => setBulkReason(e.target.value)}
+                    placeholder="Shared reason / audit reference * (e.g., Monthly stock count)"
+                    className="w-full px-3 py-1.5 text-xs border border-slate-200 rounded-lg"
+                  />
+                </div>
+              </div>
+
+              {negativeViolationsCount > 0 && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 text-xs text-rose-800">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                  <span>
+                    {negativeViolationsCount} item(s) would drop below 0. Negative inventory is disabled for this organization.
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Editable Table */}
+            <div className="flex-1 min-h-0 overflow-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 sticky top-0 z-10">
+                  <tr>
+                    <th className="text-left px-4 py-2.5 font-medium">Product &amp; SKU</th>
+                    <th className="text-right px-3 py-2.5 font-medium">Current</th>
+                    <th className="text-left px-3 py-2.5 font-medium">Adjustment Mode</th>
+                    <th className="text-right px-3 py-2.5 font-medium">Qty / Count</th>
+                    <th className="text-right px-3 py-2.5 font-medium">Reorder Level</th>
+                    <th className="text-right px-3 py-2.5 font-medium">Resulting Qty</th>
+                    <th className="text-right px-4 py-2.5 font-medium">Remove</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {bulkRows.map((row) => {
+                    const nextQty = computeBulkNextQty(row);
+                    const isInvalidNeg = !allowNegativeStock && nextQty < 0;
+                    const delta = nextQty - row.currentQty;
+
+                    return (
+                      <tr
+                        key={row.productId}
+                        className={isInvalidNeg ? 'bg-rose-50/70' : 'hover:bg-slate-50'}
+                      >
+                        <td className="px-4 py-2.5">
+                          <p className="font-semibold text-slate-900">{row.productName}</p>
+                          <p className="font-mono text-[11px] text-slate-500">{row.sku}</p>
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono tabular-nums text-slate-700">
+                          {row.currentQty} {row.unit}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <select
+                            value={row.movementType}
+                            onChange={(e) => {
+                              const nextType = e.target.value as StockMovementType;
+                              setBulkRows((prev) =>
+                                prev.map((r) =>
+                                  r.productId === row.productId
+                                    ? {
+                                        ...r,
+                                        movementType: nextType,
+                                        qtyInput:
+                                          nextType === 'stock_count'
+                                            ? String(r.currentQty)
+                                            : r.qtyInput,
+                                      }
+                                    : r
+                                )
+                              );
+                            }}
+                            className="px-2 py-1.5 text-xs border border-slate-200 rounded-md bg-white"
+                          >
+                            <option value="adjustment_add">Add (+)</option>
+                            <option value="adjustment_reduce">Reduce (-)</option>
+                            <option value="stock_count">Exact Count (=)</option>
+                            <option value="damaged">Damaged (-)</option>
+                            <option value="expired">Expired (-)</option>
+                          </select>
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          <input
+                            type="number"
+                            min={0}
+                            required
+                            value={row.qtyInput}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setBulkRows((prev) =>
+                                prev.map((r) =>
+                                  r.productId === row.productId ? { ...r, qtyInput: val } : r
+                                )
+                              );
+                            }}
+                            className="w-24 px-2 py-1 text-right font-mono tabular-nums border border-slate-200 rounded-md"
+                          />
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          <input
+                            type="number"
+                            min={0}
+                            required
+                            value={row.reorderInput}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setBulkRows((prev) =>
+                                prev.map((r) =>
+                                  r.productId === row.productId ? { ...r, reorderInput: val } : r
+                                )
+                              );
+                            }}
+                            className="w-20 px-2 py-1 text-right font-mono tabular-nums border border-slate-200 rounded-md"
+                          />
+                        </td>
+                        <td
+                          className={`px-3 py-2.5 text-right font-mono tabular-nums font-semibold ${
+                            isInvalidNeg
+                              ? 'text-rose-700'
+                              : delta > 0
+                                ? 'text-emerald-700'
+                                : delta < 0
+                                  ? 'text-amber-700'
+                                  : 'text-slate-600'
+                          }`}
+                        >
+                          {row.currentQty} → {nextQty}
+                        </td>
+                        <td className="px-4 py-2.5 text-right">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setBulkRows((prev) =>
+                                prev.filter((r) => r.productId !== row.productId)
+                              )
+                            }
+                            className="p-1.5 text-slate-400 hover:text-rose-600 rounded hover:bg-rose-50"
+                            title="Remove product from bulk batch"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {bulkRows.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="px-5 py-10 text-center text-xs text-slate-500">
+                        No products queued. Use the quick-load buttons or add products above.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Footer */}
+            <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-3.5 border-t border-slate-200 bg-slate-50/70">
+              <p className="text-xs text-slate-600 font-mono tabular-nums">
+                {bulkRows.length} item(s) queued for bulk adjustment
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={bulkSaving}
+                  onClick={() => setShowBulkAdjust(false)}
+                  className="px-4 py-2 text-xs font-medium border border-slate-200 bg-white rounded-lg text-slate-700 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={bulkSaving || bulkRows.length === 0 || negativeViolationsCount > 0}
+                  className="px-4 py-2 text-xs font-semibold bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {bulkSaving
+                    ? 'Applying Bulk Adjustment...'
+                    : `Apply Adjustment (${bulkRows.length})`}
+                </button>
+              </div>
             </div>
           </form>
         </div>

@@ -8,9 +8,12 @@ import {
   DEFAULT_SAAS_PLANS,
   evaluatePlanChangeCompatibility,
   evaluateTenantEntitlements,
+  getIncrementalPlanFeatures,
   getPlanById,
+  mergePlansWithDefaults,
   resolveSubscriptionLifecycle,
 } from '../src/lib/entitlements.ts';
+import { sanitizeHttpUrl, sanitizeOptionalImageUrl } from '../src/lib/url.ts';
 import {
   getClientDeploymentInfo,
   isTenantPermittedInTopology,
@@ -86,6 +89,23 @@ function runSaasEntitlementTests() {
   assert.equal(enterprisePlan.limits.maxBranches, null);
   assert.equal(enterprisePlan.limits.maxTerminals, null);
   assert.equal(enterprisePlan.limits.maxStaff, null);
+
+  // Plan price override merging preserves all 4 tiers sorted by sortOrder
+  const mergedPlans = mergePlansWithDefaults([
+    {
+      ...starterPlan,
+      monthlyPriceMinor: 25000,
+      annualPriceMinor: 250000,
+    },
+  ]);
+  assert.equal(mergedPlans.length, 4);
+  assert.deepEqual(
+    mergedPlans.map((p) => p.planId),
+    ['starter', 'professional', 'business_plus', 'enterprise']
+  );
+  assert.equal(getPlanById('starter', mergedPlans).monthlyPriceMinor, 25000);
+  assert.equal(getPlanById('starter', mergedPlans).annualPriceMinor, 250000);
+  assert.equal(getPlanById('professional', mergedPlans).monthlyPriceMinor, proPlan.monthlyPriceMinor);
 
   // Starter Quota Enforcement (at limit vs +1 overflow)
   const starterAtCap = evaluateTenantEntitlements({
@@ -346,6 +366,43 @@ function runSaasEntitlementTests() {
   assert.deepEqual(mapCheckoutChannelToPaystack('mobile_money'), ['mobile_money']);
   assert.deepEqual(mapCheckoutChannelToPaystack('card'), ['card']);
   assert.deepEqual(mapCheckoutChannelToPaystack('bank_transfer'), ['bank', 'bank_transfer']);
+
+  // 8. Incremental Plan Feature Inheritance ("All in <PrevPlan>, plus:")
+  const starterInc = getIncrementalPlanFeatures(starterPlan, DEFAULT_SAAS_PLANS);
+  assert.equal(starterInc.includedFromPlanName, null);
+  assert.deepEqual(
+    starterInc.additionalFeatures.map((f) => f.key),
+    ['basic_pos', 'basic_reports']
+  );
+
+  const proInc = getIncrementalPlanFeatures(proPlan, DEFAULT_SAAS_PLANS);
+  assert.equal(proInc.includedFromPlanName, 'Starter');
+  assert.deepEqual(
+    proInc.additionalFeatures.map((f) => f.key),
+    ['multi_branch', 'stock_transfers', 'advanced_inventory', 'purchasing']
+  );
+
+  const bizPlusInc = getIncrementalPlanFeatures(bizPlusPlan, DEFAULT_SAAS_PLANS);
+  assert.equal(bizPlusInc.includedFromPlanName, 'Professional');
+  assert.deepEqual(
+    bizPlusInc.additionalFeatures.map((f) => f.key),
+    ['warehouse_management', 'advanced_analytics', 'audit_logs', 'advanced_permissions']
+  );
+
+  const entInc = getIncrementalPlanFeatures(enterprisePlan, DEFAULT_SAAS_PLANS);
+  assert.equal(entInc.includedFromPlanName, 'Business Plus');
+  assert.deepEqual(
+    entInc.additionalFeatures.map((f) => f.key),
+    ['custom_branding', 'custom_integrations', 'advanced_security', 'priority_support']
+  );
+
+  // 9. URL Sanitization
+  assert.equal(sanitizeHttpUrl('https://checkout.paystack.com/abc', { httpsOnly: true }), 'https://checkout.paystack.com/abc');
+  assert.equal(sanitizeHttpUrl('http://checkout.paystack.com/abc', { httpsOnly: true }), null);
+  assert.equal(sanitizeHttpUrl('javascript:alert(1)'), null);
+  assert.equal(sanitizeHttpUrl('data:text/html,<script>alert(1)</script>'), null);
+  assert.equal(sanitizeOptionalImageUrl('  '), undefined);
+  assert.equal(sanitizeOptionalImageUrl('https://cdn.example.com/logo.png'), 'https://cdn.example.com/logo.png');
 
   console.log('ALL SAAS ISOLATION, ENTITLEMENT & BILLING TESTS PASSED');
 }

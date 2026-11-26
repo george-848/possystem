@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
 import {
@@ -36,6 +36,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
 import { useEntitlements } from '../contexts/EntitlementContext';
 import { useToast } from '../contexts/ToastContext';
+import { sanitizeImageSrc } from '../lib/url';
 import { ROUTE_FEATURE_REQUIREMENTS } from '../lib/entitlements';
 import { formatDateTime, formatMoney } from '../lib/money';
 import { markNotificationRead } from '../services/auditService';
@@ -295,6 +296,12 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
   const [switchingTenant, setSwitchingTenant] = useState(false);
+  const [logoError, setLogoError] = useState(false);
+
+  const safeOrgLogo = sanitizeImageSrc(organization?.logoUrl);
+  useEffect(() => {
+    setLogoError(false);
+  }, [organization?.logoUrl]);
 
   const visibleNavItems = useMemo(() => {
     const base = NAV_ITEMS.filter((item) => hasPermission(item.permission));
@@ -464,9 +471,21 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     <div className="flex flex-col h-full bg-white border-r border-slate-200 w-64">
       <div className="px-4 py-3.5 border-b border-slate-200 shrink-0 space-y-2.5">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white shrink-0 shadow-xs">
-            <Building2 className="w-4 h-4" />
-          </div>
+          {safeOrgLogo && !logoError ? (
+            <div className="w-9 h-9 rounded-lg border border-slate-200 bg-white flex items-center justify-center overflow-hidden shrink-0">
+              <img
+                src={safeOrgLogo}
+                alt={organization?.businessName || 'Organization Logo'}
+                referrerPolicy="no-referrer"
+                onError={() => setLogoError(true)}
+                className="w-full h-full object-contain p-0.5"
+              />
+            </div>
+          ) : (
+            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white shrink-0 shadow-xs">
+              <Building2 className="w-4 h-4" />
+            </div>
+          )}
           <div className="min-w-0 flex-1">
             <p className="text-sm font-bold text-slate-900 truncate font-display">
               {organization?.businessName || 'Multi-Branch POS System'}

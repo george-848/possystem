@@ -112,7 +112,11 @@ export default function PlatformAdminPage() {
 
   // Plan Editor state
   const [editingPlanId, setEditingPlanId] = useState<string>('starter');
+  const editingPlanIdRef = React.useRef(editingPlanId);
+  editingPlanIdRef.current = editingPlanId;
   const [planDraft, setPlanDraft] = useState<SubscriptionPlan | null>(null);
+  const [monthlyPriceInput, setMonthlyPriceInput] = useState<string>('0');
+  const [annualPriceInput, setAnnualPriceInput] = useState<string>('0');
   const [savingPlan, setSavingPlan] = useState(false);
 
   // Feature Override form
@@ -145,13 +149,17 @@ export default function PlatformAdminPage() {
       const safeTickets = Array.isArray(data?.tickets) ? data.tickets : [];
       setOverview(data);
       const selectedPlan =
-        safePlans.find((p) => p.planId === editingPlanId) || safePlans[0] || null;
+        safePlans.find((p) => p.planId === editingPlanIdRef.current) || safePlans[0] || null;
       if (selectedPlan) {
         setPlanDraft(JSON.parse(JSON.stringify(selectedPlan)) as SubscriptionPlan);
+        setMonthlyPriceInput(String(fromMinorUnits(selectedPlan.monthlyPriceMinor)));
+        setAnnualPriceInput(String(fromMinorUnits(selectedPlan.annualPriceMinor)));
         setEditingPlanId(selectedPlan.planId);
       }
-      if (!overrideForm.tenantId && safeTenants.length > 0) {
-        setOverrideForm((prev) => ({ ...prev, tenantId: safeTenants[0].tenantId }));
+      if (safeTenants.length > 0) {
+        setOverrideForm((prev) =>
+          prev.tenantId ? prev : { ...prev, tenantId: safeTenants[0].tenantId }
+        );
       }
       const draftMap: Record<
         string,
@@ -174,7 +182,7 @@ export default function PlatformAdminPage() {
     } finally {
       setLoading(false);
     }
-  }, [isPlatformAdmin, editingPlanId, overrideForm.tenantId, notify]);
+  }, [isPlatformAdmin, notify]);
 
   useEffect(() => {
     void loadOverview();
@@ -359,6 +367,8 @@ export default function PlatformAdminPage() {
   const handleSelectPlanForEdit = (plan: SubscriptionPlan) => {
     setEditingPlanId(plan.planId);
     setPlanDraft(JSON.parse(JSON.stringify(plan)) as SubscriptionPlan);
+    setMonthlyPriceInput(String(fromMinorUnits(plan.monthlyPriceMinor)));
+    setAnnualPriceInput(String(fromMinorUnits(plan.annualPriceMinor)));
   };
 
   const handleSavePlanConfig = async (e: React.FormEvent) => {
@@ -366,8 +376,13 @@ export default function PlatformAdminPage() {
     if (!planDraft) return;
     setSavingPlan(true);
     try {
-      await adminSavePlanConfig(planDraft);
-      notify('success', 'Plan Configuration Saved', `${planDraft.name} limits and pricing updated.`);
+      const updatedPlan: SubscriptionPlan = {
+        ...planDraft,
+        monthlyPriceMinor: toMinorUnits(monthlyPriceInput),
+        annualPriceMinor: toMinorUnits(annualPriceInput),
+      };
+      await adminSavePlanConfig(updatedPlan);
+      notify('success', 'Plan Configuration Saved', `${updatedPlan.name} limits and pricing updated.`);
       await loadOverview();
     } catch (err) {
       notify('error', 'Save Failed', err instanceof Error ? err.message : 'Unable to save plan.');
@@ -774,13 +789,15 @@ export default function PlatformAdminPage() {
                     type="number"
                     step="0.01"
                     min="0"
-                    value={fromMinorUnits(planDraft.monthlyPriceMinor)}
-                    onChange={(e) =>
+                    value={monthlyPriceInput}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setMonthlyPriceInput(val);
                       setPlanDraft({
                         ...planDraft,
-                        monthlyPriceMinor: toMinorUnits(e.target.value),
-                      })
-                    }
+                        monthlyPriceMinor: toMinorUnits(val),
+                      });
+                    }}
                     className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg font-mono"
                   />
                 </div>
@@ -792,13 +809,15 @@ export default function PlatformAdminPage() {
                     type="number"
                     step="0.01"
                     min="0"
-                    value={fromMinorUnits(planDraft.annualPriceMinor)}
-                    onChange={(e) =>
+                    value={annualPriceInput}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setAnnualPriceInput(val);
                       setPlanDraft({
                         ...planDraft,
-                        annualPriceMinor: toMinorUnits(e.target.value),
-                      })
-                    }
+                        annualPriceMinor: toMinorUnits(val),
+                      });
+                    }}
                     className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg font-mono"
                   />
                 </div>

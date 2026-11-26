@@ -3,6 +3,8 @@ import {
   calculateLineAmounts,
   calculateOrderTotals,
   formatMoney,
+  formatTaxDisplayValue,
+  formatTaxRatePercentage,
   fromMinorUnits,
   resolveDateRange,
   toMinorUnits,
@@ -34,7 +36,7 @@ import {
 } from '../src/lib/productImport.ts';
 import { resolveReceiptFields } from '../src/lib/receiptConfig.ts';
 import { createRequire } from 'node:module';
-import * as XLSX from 'xlsx';
+import writeXlsxFile from 'write-excel-file/node';
 import type { Category, Product, Role, SystemSettings, UserProfile } from '../src/types/pos.ts';
 
 const require = createRequire(import.meta.url);
@@ -42,7 +44,7 @@ const BitArray = require('@zxing/library/cjs/core/common/BitArray').default;
 const Code128Reader = require('@zxing/library/cjs/core/oned/Code128Reader').default;
 const EAN13Reader = require('@zxing/library/cjs/core/oned/EAN13Reader').default;
 
-function runTests() {
+async function runTests() {
   // 1. Minor unit conversion precision
   assert.equal(toMinorUnits('19.99'), 1999);
   assert.equal(toMinorUnits(0.1 + 0.2), 30);
@@ -108,6 +110,48 @@ function runTests() {
   assert.equal(orderTotals.taxMinor, 1350); // 15% of 9000
   assert.equal(orderTotals.totalMinor, 19350);
   assert.equal(orderTotals.cogsMinor, 12000);
+
+  // 3b. Tax-inclusive / deducted-from-product-price calculation
+  const taxInclLine = calculateLineAmounts(
+    {
+      unitPriceMinor: 10000,
+      costPriceMinor: 6000,
+      quantity: 1,
+      discountMinor: 0,
+      taxCategory: 'standard',
+    },
+    1500,
+    true
+  );
+  assert.equal(taxInclLine.taxMinor, 1304); // round(10000 * 1500 / 11500)
+  assert.equal(taxInclLine.netBeforeTax, 8696);
+  assert.equal(taxInclLine.lineTotalMinor, 10000);
+
+  const taxInclOrder = calculateOrderTotals(
+    [
+      {
+        unitPriceMinor: 10000,
+        costPriceMinor: 5000,
+        quantity: 1,
+        discountMinor: 0,
+        taxCategory: 'standard',
+      },
+      {
+        unitPriceMinor: 10000,
+        costPriceMinor: 7000,
+        quantity: 1,
+        discountMinor: 0,
+        taxCategory: 'zero',
+      },
+    ],
+    2000,
+    1500,
+    true
+  );
+  assert.equal(taxInclOrder.subtotalMinor, 20000);
+  assert.equal(taxInclOrder.discountMinor, 2000);
+  assert.equal(taxInclOrder.taxMinor, 1174); // round(9000 * 1500 / 11500)
+  assert.equal(taxInclOrder.totalMinor, 18000); // customer pays product price minus discount
 
   // 4. RBAC preset verification & 52 permissions
   assert.equal(ALL_PERMISSION_IDS.length, 52);
@@ -337,19 +381,26 @@ function runTests() {
 
   // 10. Excel (.xlsx) & CSV product import parsing, mapping, and validation
   const csvRows = parseCsvText(
-    '\uFEFF"Product Name",SKU,Barcode,Category,"Cost Price","Selling Price","Tax Category","Initial Stock"\r\n' +
-      '"Cola ""Zero"", 500ml",sku-cola,5449000000996,Beverages,GH₵4.00,9.50,standard,30\r\n' +
-      '"Oat Cereal, 1kg",sku-oats,5901234123457,Breakfast,12.50,21.00,zero-rated,15\r\n' +
-      '"Bad Price Item",sku-bad,,Breakfast,abc,-5,exempt,0\r\n'
+    '\uFEFF"Product Name",SKU,Barcode,Category,"Cost Price","Selling Price","Tax Category","Initial Stock","Image URL"\r\n' +
+      '"Cola ""Zero"", 500ml",sku-cola,5449000000996,Beverages,GH₵4.00,9.50,standard,30,https://cdn.example.com/cola.png\r\n' +
+      '"Oat Cereal, 1kg",sku-oats,5901234123457,Breakfast,12.50,21.00,zero-rated,15,\r\n' +
+      '"Bad Price Item",sku-bad,,Breakfast,abc,-5,exempt,0,javascript:alert(1)\r\n'
   );
   assert.equal(csvRows.length, 4);
   assert.equal(csvRows[1][0], 'Cola "Zero", 500ml');
 
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(csvRows);
-  XLSX.utils.book_append_sheet(wb, ws, 'Catalog');
-  const xlsxArrayBuffer = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
-  const parsedXlsx = parseSpreadsheetBuffer(xlsxArrayBuffer, 'catalog.xlsx');
+  const sheetData = csvRows.map((row) =>
+    row.map((val) => ({
+      type: String,
+      value: val,
+    }))
+  );
+  const xlsxBuffer = await writeXlsxFile(sheetData, { sheet: 'Catalog' }).toBuffer();
+  const xlsxArrayBuffer = xlsxBuffer.buffer.slice(
+    xlsxBuffer.byteOffset,
+    xlsxBuffer.byteOffset + xlsxBuffer.byteLength
+  ) as ArrayBuffer;
+  const parsedXlsx = await parseSpreadsheetBuffer(xlsxArrayBuffer, 'catalog.xlsx');
   assert.deepEqual(parsedXlsx.sheetNames, ['Catalog']);
   assert.equal(parsedXlsx.sheets.Catalog.length, 4);
 
@@ -357,6 +408,7 @@ function runTests() {
   assert.equal(detectedMap.name, 0);
   assert.equal(detectedMap.sku, 1);
   assert.equal(detectedMap.sellingPrice, 5);
+  assert.equal(detectedMap.imageUrl, 8);
 
   const existingCategories: Category[] = [
     {
@@ -381,6 +433,7 @@ function runTests() {
   assert.equal(evaluated[0].normalized?.existingCategoryId, 'cat_bev');
   assert.equal(evaluated[0].normalized?.costPriceMinor, 400);
   assert.equal(evaluated[0].normalized?.sellingPriceMinor, 950);
+  assert.equal(evaluated[0].normalized?.imageUrl, 'https://cdn.example.com/cola.png');
 
   assert.equal(evaluated[1].action, 'create');
   assert.equal(evaluated[1].normalized?.sku, 'SKU-OATS');
@@ -389,9 +442,133 @@ function runTests() {
   assert.equal(evaluated[1].normalized?.existingCategoryId, undefined);
 
   assert.equal(evaluated[2].action, 'error');
-  assert.equal(evaluated[2].errors.length >= 2, true);
+  assert.equal(evaluated[2].errors.length >= 3, true);
+  assert.equal(
+    evaluated[2].errors.some((e) => e.includes('http:// or https://')),
+    true
+  );
+
+  // 11. Per-branch inventory threshold notifications
+  const { computeBranchLowStockAlerts, summarizeAlertsByBranch } = await import(
+    '../src/lib/inventoryAlerts.ts'
+  );
+  const testBranches = [
+    {
+      branchId: 'br_1',
+      organizationId: 'org_1',
+      branchCode: 'MAIN',
+      branchName: 'Main Branch',
+      status: 'active' as const,
+    },
+    {
+      branchId: 'br_2',
+      organizationId: 'org_1',
+      branchCode: 'WEST',
+      branchName: 'West Branch',
+      status: 'active' as const,
+    },
+  ];
+  const thresholdProducts: Product[] = [
+    {
+      ...sampleProducts[0], // availableBranchIds: ['br_1'], minimumStock: 5
+      productId: 'p_low_br1',
+      name: 'Low Juice',
+      sku: 'SKU-JUICE',
+      minimumStock: 8,
+      availableBranchIds: ['br_1'],
+      status: 'active',
+    },
+    {
+      ...sampleProducts[0],
+      productId: 'p_unstocked_both',
+      name: 'Sugar 1kg',
+      sku: 'SKU-SUGAR',
+      minimumStock: 6,
+      availableBranchIds: ['br_1', 'br_2'],
+      status: 'active',
+    },
+    {
+      ...sampleProducts[0],
+      productId: 'p_zero_min',
+      name: 'Gift Bag',
+      sku: 'SKU-BAG',
+      minimumStock: 0,
+      availableBranchIds: ['br_1'],
+      status: 'active',
+    },
+  ];
+  const testInv = [
+    {
+      inventoryId: 'br_1_p_low_br1',
+      organizationId: 'org_1',
+      branchId: 'br_1',
+      productId: 'p_low_br1',
+      quantityAvailable: 3,
+      reorderLevel: 10,
+      costPriceMinor: 500,
+      sellingPriceMinor: 1000,
+    },
+    {
+      inventoryId: 'br_2_p_unstocked_both',
+      organizationId: 'org_1',
+      branchId: 'br_2',
+      productId: 'p_unstocked_both',
+      quantityAvailable: 12,
+      reorderLevel: 6,
+      costPriceMinor: 500,
+      sellingPriceMinor: 1000,
+    },
+  ];
+  const branchAlerts = computeBranchLowStockAlerts({
+    products: thresholdProducts,
+    branchInventory: testInv,
+    branches: testBranches,
+  });
+  // p_low_br1 (br_1: 3 < 10 -> critical), p_unstocked_both (br_1: 0 < 6 -> out_of_stock; br_2 has 12 >= 6 so NOT flagged), p_zero_min has min 0 & no inv so NOT flagged
+  assert.equal(branchAlerts.length, 2);
+  assert.equal(branchAlerts[0].branchId, 'br_1');
+  assert.equal(branchAlerts[0].productId, 'p_unstocked_both');
+  assert.equal(branchAlerts[0].severity, 'out_of_stock');
+  assert.equal(branchAlerts[0].deficit, 6);
+  assert.equal(branchAlerts[1].productId, 'p_low_br1');
+  assert.equal(branchAlerts[1].severity, 'critical');
+  assert.equal(branchAlerts[1].minimumThreshold, 10);
+  assert.equal(branchAlerts[1].deficit, 7);
+
+  const groupedAlerts = summarizeAlertsByBranch(branchAlerts, testBranches);
+  assert.equal(groupedAlerts.length, 1);
+  assert.equal(groupedAlerts[0].branchId, 'br_1');
+  assert.equal(groupedAlerts[0].totalCount, 2);
+  assert.equal(groupedAlerts[0].outOfStockCount, 1);
+  assert.equal(groupedAlerts[0].criticalCount, 1);
+
+  // 12. Tax display mode formatting (amount vs percentage)
+  assert.equal(formatTaxRatePercentage(1500), '15%');
+  assert.equal(formatTaxRatePercentage(1250), '12.5%');
+  assert.equal(formatTaxRatePercentage(0), '0%');
+  assert.equal(
+    formatTaxDisplayValue({
+      taxMinor: 1500,
+      currencySymbol: 'GH₵',
+      defaultTaxRateBps: 1500,
+      taxDisplayMode: 'amount',
+    }),
+    formatMoney(1500, 'GH₵')
+  );
+  assert.equal(
+    formatTaxDisplayValue({
+      taxMinor: 1500,
+      currencySymbol: 'GH₵',
+      defaultTaxRateBps: 1500,
+      taxDisplayMode: 'percentage',
+    }),
+    '15%'
+  );
 
   console.log('ALL POS LOGIC & RBAC TESTS PASSED');
 }
 
-runTests();
+runTests().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

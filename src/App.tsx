@@ -83,13 +83,17 @@ function AppRoutes() {
   const {
     authReady,
     loadingProfile,
+    loadingRole,
     firebaseUser,
     userProfile,
     userRole,
+    pendingInvitation,
     needsOrgSetup,
+    isBootstrapEmail,
   } = useAuth();
+  const { deploymentMode } = useEntitlements();
 
-  if (!authReady || (firebaseUser && loadingProfile)) {
+  if (!authReady || (firebaseUser && (loadingProfile || loadingRole))) {
     return (
       <div className="min-h-screen bg-[#F8FAFC] flex items-center justify-center p-6">
         <div className="bg-white border border-slate-200 rounded-xl px-6 py-5 text-sm font-medium text-slate-700">
@@ -122,9 +126,15 @@ function AppRoutes() {
 
   // Invited / Uninvited / Suspended / Inactive role guard
   if (!userProfile || userProfile.accountStatus !== 'active' || !userRole) {
+    const canAccessSetup =
+      !pendingInvitation &&
+      userProfile?.accountStatus !== 'suspended' &&
+      (deploymentMode === 'shared' || isBootstrapEmail);
+
     return (
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        {canAccessSetup && <Route path="/setup" element={<OrganizationSetupPage />} />}
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     );

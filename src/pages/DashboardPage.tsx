@@ -28,8 +28,13 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { DashboardStockNotificationPanel } from '../components/DashboardStockNotificationPanel';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
+import {
+  computeBranchLowStockAlerts,
+  summarizeAlertsByBranch,
+} from '../lib/inventoryAlerts';
 import {
   type DatePreset,
   formatDateTime,
@@ -109,6 +114,7 @@ export function DashboardPage() {
     userProfile,
     userRole,
     organization,
+    systemSettings,
     authorizedBranches,
     branches,
     activeBranchId,
@@ -128,6 +134,7 @@ export function DashboardPage() {
     purchases,
     stockTransfers,
     cashSessions,
+    notifications,
   } = useData();
 
   const [datePreset, setDatePreset] = useState<DatePreset>('last30');
@@ -281,19 +288,35 @@ export function DashboardPage() {
     financials.revenueMinor,
   ]);
 
-  const lowStockItems = useMemo(() => {
-    const prodMap = new Map(products.map((p) => [p.productId, p]));
-    const branchMap = new Map(branches.map((b) => [b.branchId, b]));
-    return scopedInventory
-      .filter((i) => i.quantityAvailable <= i.reorderLevel)
-      .map((i) => ({
-        ...i,
-        productName: prodMap.get(i.productId)?.name || i.productId,
-        sku: prodMap.get(i.productId)?.sku || '',
-        branchName: branchMap.get(i.branchId)?.branchName || i.branchId,
-      }))
-      .slice(0, 8);
-  }, [scopedInventory, products, branches]);
+  const dashboardScopeBranches = useMemo(() => {
+    if (isSuperAdmin) return branches;
+    return activeBranch ? [activeBranch] : authorizedBranches;
+  }, [isSuperAdmin, branches, activeBranch, authorizedBranches]);
+
+  const branchLowStockAlerts = useMemo(
+    () =>
+      computeBranchLowStockAlerts({
+        products,
+        branchInventory,
+        branches: dashboardScopeBranches,
+      }),
+    [products, branchInventory, dashboardScopeBranches]
+  );
+
+  const branchAlertSummaries = useMemo(
+    () => summarizeAlertsByBranch(branchLowStockAlerts, dashboardScopeBranches),
+    [branchLowStockAlerts, dashboardScopeBranches]
+  );
+
+  const activeBranchAlerts = useMemo(
+    () => branchLowStockAlerts.filter((a) => a.branchId === activeBranchId),
+    [branchLowStockAlerts, activeBranchId]
+  );
+
+  const lowStockItems = useMemo(
+    () => branchLowStockAlerts.slice(0, 8),
+    [branchLowStockAlerts]
+  );
 
   // Continuous timeline series (hourly buckets for 1-day views, daily buckets for multi-day views)
   const salesTrendData = useMemo(() => {
@@ -619,6 +642,21 @@ export function DashboardPage() {
               )}
             </div>
           </motion.div>
+
+          <DashboardStockNotificationPanel
+            alerts={activeBranchAlerts}
+            branchSummaries={branchAlertSummaries.filter((b) => b.branchId === activeBranchId)}
+            notifications={notifications.filter(
+              (n) => !n.branchId || n.branchId === activeBranchId
+            )}
+            currentUid={userProfile?.uid}
+            activeBranchId={activeBranchId}
+            multiBranch={false}
+            canAdjustInventory={hasPermission('inventory.adjust')}
+            canCreatePurchase={hasPermission('purchases.create')}
+            lowStockNotificationsEnabled={systemSettings?.lowStockNotificationsEnabled ?? true}
+            compact
+          />
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <motion.div
@@ -1006,6 +1044,19 @@ export function DashboardPage() {
         </div>
       </motion.div>
 
+      <DashboardStockNotificationPanel
+        alerts={branchLowStockAlerts}
+        branchSummaries={branchAlertSummaries}
+        notifications={notifications}
+        currentUid={userProfile?.uid}
+        activeBranchId={activeBranchId}
+        multiBranch={isSuperAdmin && dashboardScopeBranches.length > 1}
+        canAdjustInventory={hasPermission('inventory.adjust')}
+        canCreatePurchase={hasPermission('purchases.create')}
+        lowStockNotificationsEnabled={systemSettings?.lowStockNotificationsEnabled ?? true}
+        onSwitchBranch={setActiveBranchId}
+      />
+
       {/* Primary Colorized KPI Grid with Embedded Mini Charts */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <motion.div
@@ -1180,7 +1231,7 @@ export function DashboardPage() {
                   {formatMoney(financials.inventoryValuationMinor, sym)}
                 </p>
                 <p className="text-[11px] leading-snug text-slate-600 mt-0.5 tabular-nums">
-                  {lowStockItems.length} low-stock SKU alert(s)
+                  {branchLowStockAlerts.length} low-stock SKU alert(s)
                 </p>
               </>
             )}
@@ -1608,17 +1659,19 @@ export function DashboardPage() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {lowStockItems.map((item) => (
-                  <tr key={item.inventoryId} className="hover:bg-amber-50/30 transition-colors">
+                  <tr key={item.key} className="hover:bg-amber-50/30 transition-colors">
                     <td className="px-4 py-2">
                       <p className="text-xs font-medium text-slate-900">{item.productName}</p>
                       <p className="text-[11px] font-mono text-slate-400">{item.sku}</p>
                     </td>
-                    <td className="px-4 py-2 text-xs text-slate-600">{item.branchName}</td>
+                    <td className="px-4 py-2 text-xs text-slate-600">
+                      {item.branchName} ({item.branchCode})
+                    </td>
                     <td className="px-4 py-2 text-right font-mono text-xs font-semibold text-rose-700 tabular-nums">
                       {item.quantityAvailable}
                     </td>
                     <td className="px-4 py-2 text-right font-mono text-xs text-slate-500 tabular-nums">
-                      {item.reorderLevel}
+                      {item.minimumThreshold}
                     </td>
                   </tr>
                 ))}

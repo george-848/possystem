@@ -8,7 +8,7 @@ import {
 } from 'firebase/firestore';
 import { getPlanById, DEFAULT_SAAS_PLANS } from '../lib/entitlements';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
-import { DEFAULT_ROLE_PRESETS, PERMISSION_CATALOG } from '../lib/permissions';
+import { DEFAULT_ROLE_PRESETS } from '../lib/permissions';
 import { DEFAULT_RECEIPT_VISIBLE_FIELDS } from '../lib/receiptConfig';
 import type {
   FeatureKey,
@@ -100,7 +100,8 @@ export async function registerTenantBusiness(
     }
   }
 
-  // Atomic client Firestore bootstrap fallback guarded by isBootstrapOrgOwner() in firestore.rules
+  // Client Firestore bootstrap fallback guarded by isBootstrapOrgOwner() in firestore.rules.
+  // Ordered in small batches (<=3 docs/batch) while tenants/{orgId} does not yet exist so every write stays well within Firestore Security Rules' per-request get/exists lookup limits.
   const organizationId = makeId('org');
   const branchId = makeId('br');
   const terminalId = makeId('term');
@@ -126,10 +127,12 @@ export async function registerTenantBusiness(
   const nowIso = new Date(nowMs).toISOString();
   const trialEndsAt = new Date(nowMs + (selectedPlan.trialDays || 14) * 86_400_000).toISOString();
 
+  let currentStepPath = `users/${currentUser.uid}`;
   try {
     const existingUserSnap = await getDoc(doc(db, 'users', currentUser.uid));
 
-    // Step 1: Create organization first so isBootstrapOrgOwner(orgId) verifies ownerUid
+    // 1. Create Organization root first so isBootstrapOrgOwner(orgId) verifies ownerUid
+    currentStepPath = `organizations/${organizationId}`;
     await setDoc(
       doc(db, 'organizations', organizationId),
       cleanOptional({
@@ -153,40 +156,9 @@ export async function registerTenantBusiness(
       })
     );
 
-    const batch = writeBatch(db);
-
-    // 2. Tenant-scoped RBAC roles
-    for (const preset of DEFAULT_ROLE_PRESETS) {
-      const scopedRoleId = `${organizationId}_${preset.roleId}`;
-      batch.set(doc(db, 'roles', scopedRoleId), {
-        roleId: scopedRoleId,
-        organizationId,
-        name: preset.name,
-        description: preset.description,
-        scope: preset.scope,
-        permissions: preset.permissions,
-        isSystem: true,
-        isActive: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    }
-
-    // 3. Permission definitions
-    for (const perm of PERMISSION_CATALOG) {
-      const permDocId = `${organizationId}_${perm.id.replace(/\./g, '_')}`;
-      batch.set(doc(db, 'permissions', permDocId), {
-        permissionId: perm.id,
-        organizationId,
-        module: perm.module,
-        action: perm.action,
-        label: perm.label,
-        description: perm.description,
-      });
-    }
-
-    // 4. Primary Branch
-    batch.set(
+    // 2. Primary Branch (must exist before terminal)
+    currentStepPath = `branches/${branchId}`;
+    await setDoc(
       doc(db, 'branches', branchId),
       cleanOptional({
         branchId,
@@ -207,8 +179,47 @@ export async function registerTenantBusiness(
       })
     );
 
-    // 5. System Settings
-    batch.set(doc(db, 'systemSettings', settingId), {
+    // 3. Primary POS Terminal (created before tenants/{orgId} so isBootstrapOrgOwner succeeds in 4 lookups)
+    currentStepPath = `terminals/${terminalId}`;
+    await setDoc(doc(db, 'terminals', terminalId), {
+      terminalId,
+      organizationId,
+      branchId,
+      terminalCode: 'POS-01',
+      name: 'Front Counter Register 1',
+      deviceLabel: 'Primary Web Counter',
+      status: 'active',
+      createdBy: currentUser.uid,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    // 4. Tenant-scoped RBAC roles (2 docs per batch)
+    currentStepPath = `roles/${superAdminRoleId}`;
+    for (let i = 0; i < DEFAULT_ROLE_PRESETS.length; i += 2) {
+      const roleBatch = writeBatch(db);
+      for (const preset of DEFAULT_ROLE_PRESETS.slice(i, i + 2)) {
+        const scopedRoleId = `${organizationId}_${preset.roleId}`;
+        roleBatch.set(doc(db, 'roles', scopedRoleId), {
+          roleId: scopedRoleId,
+          organizationId,
+          name: preset.name,
+          description: preset.description,
+          scope: preset.scope,
+          permissions: preset.permissions,
+          isSystem: true,
+          isActive: true,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+      await roleBatch.commit();
+    }
+
+    // 5. System Settings, Trial Subscription, Membership & Usage Tracking (2 small batches)
+    currentStepPath = `subscriptions/${subscriptionId}`;
+    const configBatch = writeBatch(db);
+    configBatch.set(doc(db, 'systemSettings', settingId), {
       settingId,
       organizationId,
       receiptHeader: `${input.businessName.trim()} — Official Retail Receipt`.slice(0, 300),
@@ -222,11 +233,10 @@ export async function registerTenantBusiness(
       expenseApprovalLimitMinor: 50000,
       refundWindowDays: 7,
       lowStockNotificationsEnabled: true,
+      taxIncludedInPrice: false,
       updatedAt: serverTimestamp(),
     });
-
-    // 6. Trial Subscription
-    batch.set(doc(db, 'subscriptions', subscriptionId), {
+    configBatch.set(doc(db, 'subscriptions', subscriptionId), {
       subscriptionId,
       tenantId: organizationId,
       planId: selectedPlan.planId as PlanId,
@@ -239,9 +249,66 @@ export async function registerTenantBusiness(
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
+    await configBatch.commit();
 
-    // 7. SaaS Tenant Document
-    batch.set(
+    currentStepPath = `tenantMemberships/${membershipId}`;
+    const memberUsageBatch = writeBatch(db);
+    memberUsageBatch.set(doc(db, 'tenantMemberships', membershipId), {
+      membershipId,
+      tenantId: organizationId,
+      uid: currentUser.uid,
+      email: safeEmail,
+      fullName,
+      roleId: superAdminRoleId,
+      branchIds: [branchId],
+      defaultBranchId: branchId,
+      isOwner: true,
+      status: 'active',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    memberUsageBatch.set(doc(db, 'usageTracking', organizationId), {
+      tenantId: organizationId,
+      branchCount: 1,
+      terminalCount: 1,
+      staffCount: 1,
+      productCount: 0,
+      updatedAt: serverTimestamp(),
+    });
+    await memberUsageBatch.commit();
+
+    // 6. Starter Categories (2 docs per batch)
+    if (input.seedStarterCategories) {
+      currentStepPath = `categories/${organizationId}`;
+      const starterCats = [
+        'Beverages & Drinks',
+        'Groceries & Pantry',
+        'Electronics & Accessories',
+        'Personal Care',
+        'Household Supplies',
+      ];
+      for (let i = 0; i < starterCats.length; i += 2) {
+        const catBatch = writeBatch(db);
+        for (const name of starterCats.slice(i, i + 2)) {
+          const categoryId = makeId('cat');
+          catBatch.set(doc(db, 'categories', categoryId), {
+            categoryId,
+            organizationId,
+            name,
+            description: `${name} retail category`,
+            status: 'active',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+        await catBatch.commit();
+      }
+    }
+
+    // 7. Atomically commit SaaS Tenant record + Active User Profile last
+    currentStepPath = `tenants/${organizationId}`;
+    const finalBatch = writeBatch(db);
+    finalBatch.set(
       doc(db, 'tenants', organizationId),
       cleanOptional({
         tenantId: organizationId,
@@ -262,24 +329,8 @@ export async function registerTenantBusiness(
       })
     );
 
-    // 8. Membership & Active User Profile
-    batch.set(doc(db, 'tenantMemberships', membershipId), {
-      membershipId,
-      tenantId: organizationId,
-      uid: currentUser.uid,
-      email: safeEmail,
-      fullName,
-      roleId: superAdminRoleId,
-      branchIds: [branchId],
-      defaultBranchId: branchId,
-      isOwner: true,
-      status: 'active',
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-
     if (existingUserSnap.exists()) {
-      batch.update(doc(db, 'users', currentUser.uid), {
+      finalBatch.update(doc(db, 'users', currentUser.uid), {
         organizationId,
         branchIds: [branchId],
         defaultBranchId: branchId,
@@ -290,7 +341,7 @@ export async function registerTenantBusiness(
         updatedAt: serverTimestamp(),
       });
     } else {
-      batch.set(
+      finalBatch.set(
         doc(db, 'users', currentUser.uid),
         cleanOptional({
           uid: currentUser.uid,
@@ -310,55 +361,7 @@ export async function registerTenantBusiness(
         })
       );
     }
-
-    // 9. Usage Tracking
-    batch.set(doc(db, 'usageTracking', organizationId), {
-      tenantId: organizationId,
-      branchCount: 1,
-      terminalCount: 1,
-      staffCount: 1,
-      productCount: 0,
-      updatedAt: serverTimestamp(),
-    });
-
-    // 10. Starter Categories
-    if (input.seedStarterCategories) {
-      const starterCats = [
-        'Beverages & Drinks',
-        'Groceries & Pantry',
-        'Electronics & Accessories',
-        'Personal Care',
-        'Household Supplies',
-      ];
-      for (const name of starterCats) {
-        const categoryId = makeId('cat');
-        batch.set(doc(db, 'categories', categoryId), {
-          categoryId,
-          organizationId,
-          name,
-          description: `${name} retail category`,
-          status: 'active',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      }
-    }
-
-    await batch.commit();
-
-    // 11. Primary POS Terminal (after branch exists)
-    await setDoc(doc(db, 'terminals', terminalId), {
-      terminalId,
-      organizationId,
-      branchId,
-      terminalCode: 'POS-01',
-      name: 'Front Counter Register 1',
-      deviceLabel: 'Primary Web Counter',
-      status: 'active',
-      createdBy: currentUser.uid,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
+    await finalBatch.commit();
 
     await recordAuditLog({
       organizationId,
@@ -371,7 +374,7 @@ export async function registerTenantBusiness(
 
     return { organizationId, branchId };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `organizations/${organizationId}`);
+    handleFirestoreError(error, OperationType.WRITE, currentStepPath);
   }
 }
 

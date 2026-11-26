@@ -26,6 +26,7 @@ import {
 } from '../services/entitlementServer.ts';
 import {
   EntitlementCheckSchema,
+  PlanIdSchema,
   TenantRegisterSchema,
   TerminalCreateSchema,
   TerminalUpdateSchema,
@@ -233,6 +234,7 @@ saasRouter.post(
         expenseApprovalLimitMinor: 50000,
         refundWindowDays: 7,
         lowStockNotificationsEnabled: true,
+        taxIncludedInPrice: false,
         updatedAt: FieldValue.serverTimestamp(),
       });
 
@@ -585,7 +587,12 @@ const handleTerminalUpdate = async (req: AuthenticatedRequest, res: Response) =>
     return;
   }
 
-  const terminalId = String(req.params.terminalId || '');
+  const terminalIdParsed = PlanIdSchema.safeParse(String(req.params.terminalId || ''));
+  if (!terminalIdParsed.success) {
+    res.status(400).json({ error: 'Invalid terminal ID.', requestId: req.requestId });
+    return;
+  }
+  const terminalId = terminalIdParsed.data;
   const tenantId = req.tenantContext!.tenantId;
 
   try {

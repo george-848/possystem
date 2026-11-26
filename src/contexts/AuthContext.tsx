@@ -59,6 +59,7 @@ interface AuthContextValue {
   firebaseUser: FirebaseUser | null;
   authReady: boolean;
   loadingProfile: boolean;
+  loadingRole: boolean;
   userProfile: UserProfile | null;
   userRole: Role | null;
   organization: Organization | null;
@@ -94,6 +95,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [loadingProfile, setLoadingProfile] = useState(true);
+  const [loadingRole, setLoadingRole] = useState(false);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [userRole, setUserRole] = useState<Role | null>(null);
   const [organization, setOrganization] = useState<Organization | null>(null);
@@ -123,6 +125,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setPendingInvitation(null);
         setNeedsOrgSetup(false);
         setLoadingProfile(false);
+        setLoadingRole(false);
         setLoginLoggedUid(null);
         return;
       }
@@ -145,6 +148,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setUserProfile(profile);
           setPendingInvitation(null);
           setNeedsOrgSetup(false);
+          if (profile.accountStatus === 'active') {
+            setLoadingRole(true);
+          } else {
+            setLoadingRole(false);
+          }
           setLoadingProfile(false);
 
           if (profile.accountStatus === 'active' && loginLoggedUid !== profile.uid) {
@@ -205,6 +213,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!userProfile || userProfile.accountStatus !== 'active') {
       setUserRole(null);
+      setLoadingRole(false);
       setOrganization(null);
       setSystemSettings(null);
       setBranches([]);
@@ -212,6 +221,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const orgId = userProfile.organizationId;
+    setLoadingRole(true);
 
     const unsubOrg = onSnapshot(
       doc(db, 'organizations', orgId),
@@ -225,8 +235,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       doc(db, 'roles', userProfile.roleId),
       (snap) => {
         setUserRole(snap.exists() ? (snap.data() as Role) : null);
+        setLoadingRole(false);
       },
-      (err) => handleFirestoreError(err, OperationType.GET, `roles/${userProfile.roleId}`)
+      (err) => {
+        setLoadingRole(false);
+        handleFirestoreError(err, OperationType.GET, `roles/${userProfile.roleId}`);
+      }
     );
 
     const unsubBranches = onSnapshot(
@@ -373,6 +387,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         firebaseUser,
         authReady,
         loadingProfile,
+        loadingRole,
         userProfile,
         userRole,
         organization,

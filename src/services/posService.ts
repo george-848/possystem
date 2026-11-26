@@ -15,6 +15,7 @@ import {
   calculateOrderTotals,
   formatDateTime,
   formatMoney,
+  formatTaxDisplayValue,
   getDateKey,
 } from '../lib/money';
 import { resolveReceiptFields } from '../lib/receiptConfig';
@@ -50,6 +51,7 @@ export interface PosPaymentSplit {
 export interface CreateSaleInput {
   organizationId: string;
   branchId: string;
+  settingId?: string;
   cashierName: string;
   cashSessionId?: string;
   customerId?: string;
@@ -84,10 +86,16 @@ export async function processPosSale(input: CreateSaleInput): Promise<CreateSale
   // Fetch canonical prices first to verify calculations with Express backend
   const salePath = `sales/${saleId}`;
 
+  let resolvedTaxRateBps = 0;
+  let resolvedTaxIncludedInPrice = false;
+  let lowStockNotificationsEnabled = true;
+  const lowStockAlertsTriggered: Array<{ productName: string; newQty: number; threshold: number }> = [];
+
   try {
     const resultData = await runTransaction(db, async (tx): Promise<CreateSaleResult> => {
       const idempRef = doc(db, 'idempotencyKeys', input.idempotencyKey);
       const orgRef = doc(db, 'organizations', input.organizationId);
+      const settingRef = input.settingId ? doc(db, 'systemSettings', input.settingId) : null;
       const invRefs = input.items.map((item) =>
         doc(db, 'branchInventory', `${input.branchId}_${item.productId}`)
       );
@@ -99,10 +107,11 @@ export async function processPosSale(input: CreateSaleInput): Promise<CreateSale
       const summaryRef = doc(db, 'branchDailySummaries', summaryId);
 
       // ALL READS FIRST
-      const [idempSnap, orgSnap, sessionSnap, customerSnap, summarySnap, ...restSnaps] =
+      const [idempSnap, orgSnap, settingSnap, sessionSnap, customerSnap, summarySnap, ...restSnaps] =
         await Promise.all([
           tx.get(idempRef),
           tx.get(orgRef),
+          settingRef ? tx.get(settingRef) : Promise.resolve(null),
           sessionRef ? tx.get(sessionRef) : Promise.resolve(null),
           customerRef ? tx.get(customerRef) : Promise.resolve(null),
           tx.get(summaryRef),
@@ -119,6 +128,19 @@ export async function processPosSale(input: CreateSaleInput): Promise<CreateSale
       const org = orgSnap.data() as Organization;
       const allowNegative = Boolean(org.allowNegativeInventory);
       const defaultTaxRateBps = Number(org.defaultTaxRateBps || 0);
+      const settingData =
+        settingSnap &&
+        settingSnap.exists() &&
+        settingSnap.data().organizationId === input.organizationId
+          ? settingSnap.data()
+          : null;
+      const taxIncludedInPrice = Boolean(settingData?.taxIncludedInPrice);
+      lowStockNotificationsEnabled =
+        settingData && settingData.lowStockNotificationsEnabled !== undefined
+          ? Boolean(settingData.lowStockNotificationsEnabled)
+          : true;
+      resolvedTaxRateBps = defaultTaxRateBps;
+      resolvedTaxIncludedInPrice = taxIncludedInPrice;
 
       const invSnaps = restSnaps.slice(0, input.items.length);
       const prodSnaps = restSnaps.slice(input.items.length);
@@ -169,7 +191,8 @@ export async function processPosSale(input: CreateSaleInput): Promise<CreateSale
           taxCategory: c.taxCategory,
         })),
         input.orderDiscountMinor,
-        defaultTaxRateBps
+        defaultTaxRateBps,
+        taxIncludedInPrice
       );
 
       const totalTenderedMinor = input.payments.reduce((s, p) => s + p.amountMinor, 0);
@@ -238,7 +261,8 @@ export async function processPosSale(input: CreateSaleInput): Promise<CreateSale
             discountMinor: entry.item.discountMinor,
             taxCategory: entry.taxCategory,
           },
-          defaultTaxRateBps
+          defaultTaxRateBps,
+          taxIncludedInPrice
         );
         const itemId = makeId('si');
         const saleItem: SaleItem = {
@@ -262,6 +286,20 @@ export async function processPosSale(input: CreateSaleInput): Promise<CreateSale
         tx.set(doc(db, 'sales', saleId, 'items', itemId), cleanOptional({ ...saleItem }));
 
         const newQty = entry.available - entry.item.quantity;
+        const reorderThreshold = Math.max(
+          0,
+          Number(entry.inv.reorderLevel ?? entry.prod.minimumStock ?? 0)
+        );
+        if (
+          lowStockNotificationsEnabled &&
+          (newQty < reorderThreshold || (reorderThreshold > 0 && newQty <= reorderThreshold) || newQty <= 0)
+        ) {
+          lowStockAlertsTriggered.push({
+            productName: entry.prod.name,
+            newQty,
+            threshold: reorderThreshold,
+          });
+        }
         tx.update(invRefs[i], {
           quantityAvailable: newQty,
           updatedAt: serverTimestamp(),
@@ -392,19 +430,37 @@ export async function processPosSale(input: CreateSaleInput): Promise<CreateSale
       body: JSON.stringify({
         organizationId: input.organizationId,
         branchId: input.branchId,
-        defaultTaxRateBps: 0,
+        defaultTaxRateBps: resolvedTaxRateBps,
+        taxIncludedInPrice: resolvedTaxIncludedInPrice,
         orderDiscountMinor: input.orderDiscountMinor,
-        items: resultData.items.map((i) => ({
+        items: resultData.items.map((i, idx) => ({
           productId: i.productId,
           quantity: i.quantity,
           unitPriceMinor: i.unitPriceMinor,
           costPriceMinor: i.costPriceMinor,
           discountMinor: i.discountMinor,
-          taxCategory: 'standard',
+          taxCategory: input.items[idx]?.taxCategory || 'standard',
         })),
         payments: input.payments,
       }),
     }).catch(() => {});
+
+    if (lowStockNotificationsEnabled && lowStockAlertsTriggered.length > 0) {
+      const preview = lowStockAlertsTriggered
+        .slice(0, 3)
+        .map((a) => `${a.productName} (${a.newQty}/${a.threshold})`)
+        .join(', ');
+      await createNotification({
+        organizationId: input.organizationId,
+        branchId: input.branchId,
+        type: 'low_stock',
+        title:
+          lowStockAlertsTriggered.length === 1
+            ? `Low Stock Alert: ${lowStockAlertsTriggered[0].productName}`
+            : `Low Stock Alert: ${lowStockAlertsTriggered.length} Products Below Threshold`,
+        message: `${preview}${lowStockAlertsTriggered.length > 3 ? ` +${lowStockAlertsTriggered.length - 3} more` : ''} after sale ${resultData.transactionNumber}.`,
+      });
+    }
 
     await recordAuditLog({
       organizationId: input.organizationId,
@@ -726,12 +782,38 @@ export function downloadReceiptPdf(params: {
   const mode = params.paperSize || 'thermal_80';
   const sym = params.organization.currencySymbol || 'GH₵';
   const rf = resolveReceiptFields(params.settings);
+  const taxInclusive = Boolean(params.settings?.taxIncludedInPrice);
+  const taxTitle = `${params.organization.taxLabel || 'VAT'}${taxInclusive ? ' Incl.' : ''}`;
+  const formattedTaxDisplay = formatTaxDisplayValue({
+    taxMinor: params.sale.taxMinor,
+    currencySymbol: sym,
+    defaultTaxRateBps: params.organization.defaultTaxRateBps,
+    taxDisplayMode: params.settings?.taxDisplayMode,
+  });
+  const logoSrc = params.organization.logoUrl?.trim();
+  const isDataLogo =
+    typeof logoSrc === 'string' && /^data:image\/(png|jpeg|jpg|webp);base64,/i.test(logoSrc);
+  const dataLogoFmt =
+    logoSrc && /image\/(jpeg|jpg)/i.test(logoSrc)
+      ? 'JPEG'
+      : logoSrc && /image\/webp/i.test(logoSrc)
+        ? 'WEBP'
+        : 'PNG';
 
   if (mode === 'a4_portrait') {
     const docPdf = new jsPDF({ unit: 'pt', format: 'a4', orientation: 'portrait' });
     const pageW = docPdf.internal.pageSize.getWidth();
     const margin = 44;
     let y = 48;
+
+    if (rf.logo && isDataLogo && logoSrc) {
+      try {
+        docPdf.addImage(logoSrc, dataLogoFmt, pageW / 2 - 22, y - 14, 44, 44);
+        y += 42;
+      } catch {
+        // Ignore invalid image dimensions
+      }
+    }
 
     docPdf.setFont('helvetica', 'bold');
     docPdf.setFontSize(16);
@@ -847,8 +929,8 @@ export function downloadReceiptPdf(params: {
       y += 15;
     }
     if (rf.tax) {
-      docPdf.text(`Tax (${params.organization.taxLabel || 'VAT'}):`, pageW - 200, y);
-      docPdf.text(formatMoney(params.sale.taxMinor, sym), pageW - margin - 8, y, {
+      docPdf.text(`Tax (${taxTitle}):`, pageW - 200, y);
+      docPdf.text(formattedTaxDisplay, pageW - margin - 8, y, {
         align: 'right',
       });
       y += 18;
@@ -884,6 +966,16 @@ export function downloadReceiptPdf(params: {
 
   const docPdf = new jsPDF({ unit: 'mm', format: [widthMm, estimatedHeight] });
   let y = 9;
+
+  if (rf.logo && isDataLogo && logoSrc) {
+    try {
+      const logoSize = mode === 'thermal_58' ? 10 : 12;
+      docPdf.addImage(logoSrc, dataLogoFmt, centerX - logoSize / 2, 4, logoSize, logoSize);
+      y = 4 + logoSize + 4;
+    } catch {
+      // Ignore invalid image data
+    }
+  }
 
   docPdf.setFont('helvetica', 'bold');
   docPdf.setFontSize(mode === 'thermal_58' ? 9.5 : 11);
@@ -966,8 +1058,8 @@ export function downloadReceiptPdf(params: {
     y += 3.8;
   }
   if (rf.tax) {
-    docPdf.text(`Tax (${params.organization.taxLabel || 'VAT'}):`, leftX, y);
-    docPdf.text(formatMoney(params.sale.taxMinor, sym), rightX, y, { align: 'right' });
+    docPdf.text(`Tax (${taxTitle}):`, leftX, y);
+    docPdf.text(formattedTaxDisplay, rightX, y, { align: 'right' });
     y += 3.8;
   }
   y += 0.4;

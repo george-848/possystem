@@ -19,6 +19,7 @@ import { useEntitlements } from '../contexts/EntitlementContext';
 import { useToast } from '../contexts/ToastContext';
 import { isProductAssignedToBranch } from '../lib/barcode';
 import { formatMoney, fromMinorUnits, toMinorUnits } from '../lib/money';
+import { sanitizeHttpUrl } from '../lib/url';
 import {
   createCategory,
   createProduct,
@@ -174,6 +175,15 @@ export function ProductsPage() {
       notify('error', 'Select Branch', 'Select at least one branch where this product should appear.');
       return;
     }
+    const trimmedImageUrl = imageUrl.trim();
+    const safeImageUrl = trimmedImageUrl
+      ? (sanitizeHttpUrl(trimmedImageUrl) ?? undefined)
+      : undefined;
+    if (trimmedImageUrl && !safeImageUrl) {
+      notify('error', 'Invalid Image URL', 'Product image URL must start with http:// or https://.');
+      return;
+    }
+
     setSaving(true);
     try {
       const costPriceMinor = toMinorUnits(costStr);
@@ -195,7 +205,7 @@ export function ProductsPage() {
             barcode: barcode.trim() || undefined,
             brand: brand.trim() || undefined,
             unit: unit.trim() || 'pcs',
-            imageUrl: imageUrl.trim() || undefined,
+            imageUrl: safeImageUrl,
             description: description.trim() || undefined,
             costPriceMinor,
             sellingPriceMinor,
@@ -219,7 +229,7 @@ export function ProductsPage() {
           barcode,
           brand,
           unit,
-          imageUrl,
+          imageUrl: safeImageUrl,
           description,
           costPriceMinor,
           sellingPriceMinor,
@@ -397,16 +407,19 @@ export function ProductsPage() {
                   <td className="px-5 py-3">
                     <div className="flex items-center gap-3">
                       <div className="w-9 h-9 rounded-lg bg-slate-100 flex items-center justify-center shrink-0 overflow-hidden">
-                        {p.imageUrl ? (
-                          <img
-                            src={p.imageUrl}
-                            alt={p.name}
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover"
-                          />
-                        ) : (
-                          <Package className="w-4 h-4 text-slate-400" />
-                        )}
+                        {(() => {
+                          const safeImg = sanitizeHttpUrl(p.imageUrl);
+                          return safeImg ? (
+                            <img
+                              src={safeImg}
+                              alt={p.name}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <Package className="w-4 h-4 text-slate-400" />
+                          );
+                        })()}
                       </div>
                       <div>
                         <p className="text-xs font-semibold text-slate-900">{p.name}</p>

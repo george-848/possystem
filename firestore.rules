@@ -260,7 +260,7 @@ service cloud.firestore {
         isValidId(data.organizationId) &&
         data.businessName is string && data.businessName.size() >= 2 && data.businessName.size() <= 160 &&
         (!('registrationNumber' in data) || (data.registrationNumber is string && data.registrationNumber.size() <= 80)) &&
-        (!('logoUrl' in data) || (data.logoUrl is string && data.logoUrl.size() <= 1000)) &&
+        (!('logoUrl' in data) || (data.logoUrl is string && data.logoUrl.size() <= 65536)) &&
         (!('email' in data) || (data.email is string && data.email.size() <= 160)) &&
         (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
         (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
@@ -684,7 +684,7 @@ service cloud.firestore {
 
     function isValidSystemSettings(data) {
       return data.keys().hasAll(['settingId', 'organizationId', 'receiptHeader', 'receiptFooter', 'supportedPaymentMethods', 'maxCashierDiscountPct', 'expenseApprovalLimitMinor', 'refundWindowDays', 'lowStockNotificationsEnabled', 'updatedAt']) &&
-        data.keys().hasOnly(['settingId', 'organizationId', 'receiptHeader', 'receiptFooter', 'returnPolicy', 'receiptVisibleFields', 'supportedPaymentMethods', 'maxCashierDiscountPct', 'expenseApprovalLimitMinor', 'refundWindowDays', 'lowStockNotificationsEnabled', 'updatedAt']) &&
+        data.keys().hasOnly(['settingId', 'organizationId', 'receiptHeader', 'receiptFooter', 'returnPolicy', 'receiptVisibleFields', 'supportedPaymentMethods', 'maxCashierDiscountPct', 'expenseApprovalLimitMinor', 'refundWindowDays', 'lowStockNotificationsEnabled', 'taxIncludedInPrice', 'taxDisplayMode', 'updatedAt']) &&
         isValidId(data.settingId) &&
         isValidId(data.organizationId) &&
         data.receiptHeader is string && data.receiptHeader.size() <= 300 &&
@@ -700,7 +700,9 @@ service cloud.firestore {
         data.maxCashierDiscountPct is int && data.maxCashierDiscountPct >= 0 && data.maxCashierDiscountPct <= 100 &&
         data.expenseApprovalLimitMinor is int && data.expenseApprovalLimitMinor >= 0 &&
         data.refundWindowDays is int && data.refundWindowDays >= 0 && data.refundWindowDays <= 365 &&
-        data.lowStockNotificationsEnabled is bool;
+        data.lowStockNotificationsEnabled is bool &&
+        (!('taxIncludedInPrice' in data) || data.taxIncludedInPrice is bool) &&
+        (!('taxDisplayMode' in data) || data.taxDisplayMode in ['amount', 'percentage']);
     }
 
     function isValidNotification(data) {
@@ -981,6 +983,7 @@ service cloud.firestore {
       allow create: if isValidId(terminalId) && isSignedIn() && isValidTerminal(incoming()) &&
         exists(branchPath(incoming().branchId)) &&
         (
+          isPlatformAdmin() ||
           isBootstrapOrgOwner(incoming().organizationId) ||
           (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'branches.manage'))
         ) &&
@@ -1153,7 +1156,7 @@ service cloud.firestore {
       );
       allow create: if isValidId(organizationId) && isSignedIn() && isValidOrganization(incoming()) &&
         incoming().organizationId == organizationId &&
-        incoming().ownerUid == request.auth.uid &&
+        (isPlatformAdmin() || incoming().ownerUid == request.auth.uid) &&
         incoming().status == 'active' &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
@@ -1183,6 +1186,7 @@ service cloud.firestore {
       allow create: if isValidId(branchId) && isSignedIn() && isValidBranch(incoming()) &&
         exists(orgPath(incoming().organizationId)) &&
         (
+          isPlatformAdmin() ||
           isBootstrapOrgOwner(incoming().organizationId) ||
           (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'branches.create'))
         ) &&
@@ -1277,6 +1281,7 @@ service cloud.firestore {
       allow list: if isVerifiedOrProvisionedUser() && (isPlatformAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
       allow create: if isValidId(roleId) && isSignedIn() && isValidRole(incoming()) &&
         (
+          isPlatformAdmin() ||
           isBootstrapOrgOwner(incoming().organizationId) ||
           (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'roles.create'))
         ) &&
@@ -1302,6 +1307,7 @@ service cloud.firestore {
       allow list: if isVerifiedOrProvisionedUser() && (isPlatformAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
       allow create, update: if isValidId(permissionId) && isSignedIn() && isValidPermissionDef(incoming()) &&
         (
+          isPlatformAdmin() ||
           isBootstrapOrgOwner(incoming().organizationId) ||
           (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'roles.manage'))
         );
@@ -1310,10 +1316,12 @@ service cloud.firestore {
 
     match /invitations/{invitationId} {
       allow get: if isValidId(invitationId) && (
+        isPlatformAdmin() ||
         (isEmailVerified() && existing().email.lower() == request.auth.token.email.lower()) ||
         (isVerifiedOrProvisionedUser() && hasPermission(existing().organizationId, 'users.view'))
       );
       allow list: if (
+        isPlatformAdmin() ||
         (isEmailVerified() && (
           existing().email == request.auth.token.email.lower() ||
           existing().email == request.auth.token.email
@@ -1321,8 +1329,10 @@ service cloud.firestore {
         (hasUserProfile() && existing().organizationId == currentUser().organizationId && hasPermission(existing().organizationId, 'users.view'))
       );
       allow create: if isValidId(invitationId) && isVerifiedOrProvisionedUser() && isValidInvitation(incoming()) &&
-        isTenantOperational(incoming().organizationId) &&
-        hasPermission(incoming().organizationId, 'users.create') &&
+        (
+          isPlatformAdmin() ||
+          (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'users.create'))
+        ) &&
         incoming().invitationId == invitationId &&
         incoming().invitedBy == request.auth.uid &&
         incoming().status == 'pending' &&
@@ -1747,6 +1757,7 @@ service cloud.firestore {
       allow list: if isVerifiedOrProvisionedUser() && (isPlatformAdmin() || (hasUserProfile() && existing().organizationId == currentUser().organizationId));
       allow create, update: if isValidId(settingId) && isSignedIn() && isValidSystemSettings(incoming()) &&
         (
+          isPlatformAdmin() ||
           isBootstrapOrgOwner(incoming().organizationId) ||
           (isTenantOperational(incoming().organizationId) && hasPermission(incoming().organizationId, 'settings.manage'))
         ) &&

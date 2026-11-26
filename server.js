@@ -25,7 +25,7 @@ function loadFirebaseAppletConfig() {
 }
 var fileConfig = loadFirebaseAppletConfig();
 var rawProjectId = process.env.FIREBASE_PROJECT_ID?.trim() || fileConfig.projectId?.trim() || "";
-var rawDatabaseId = process.env.FIRESTORE_DATABASE_ID?.trim() || fileConfig.firestoreDatabaseId?.trim() || "(default)";
+var rawDatabaseId = process.env.FIRESTORE_DATABASE_ID?.trim() || fileConfig.firestoreDatabaseId?.trim() || "ai-studio-c407e108-91a5-4af6-afa9-6e7048272a3f";
 var hasValidProjectId = Boolean(rawProjectId) && rawProjectId !== "remixed-project-id";
 var hasValidDatabaseId = rawDatabaseId !== "remixed-firestore-database-id";
 var firebaseProjectId = hasValidProjectId ? rawProjectId : null;
@@ -943,10 +943,18 @@ function attachRequestContext(req, res, next) {
 }
 var RATE_WINDOW_MS = 6e4;
 var RATE_MAX_REQUESTS = 180;
+var RATE_CLEANUP_THRESHOLD = 1e3;
 var rateBuckets = /* @__PURE__ */ new Map();
 function apiRateLimiter(req, res, next) {
   const key = req.ip || "unknown";
   const now = Date.now();
+  if (rateBuckets.size > RATE_CLEANUP_THRESHOLD) {
+    for (const [entryKey, entryBucket] of rateBuckets.entries()) {
+      if (now > entryBucket.resetAt) {
+        rateBuckets.delete(entryKey);
+      }
+    }
+  }
   const bucket = rateBuckets.get(key);
   if (!bucket || now > bucket.resetAt) {
     rateBuckets.set(key, { count: 1, resetAt: now + RATE_WINDOW_MS });
@@ -1254,6 +1262,14 @@ function calculateOrderTotals(items, orderDiscountMinor, defaultTaxRateBps) {
 // server/validation/schemas.ts
 import { z } from "zod";
 var ID_REGEX = /^[a-zA-Z0-9_\-]+$/;
+function isHttpOrHttpsUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
 var FeatureKeySchema = z.enum([
   "basic_pos",
   "basic_reports",
@@ -1311,7 +1327,7 @@ var InvitationEmailSchema = z.object({
   organizationName: z.string().min(1).max(160),
   roleName: z.string().min(1).max(100),
   branchSummary: z.string().min(1).max(300),
-  inviteUrl: z.string().url().max(500)
+  inviteUrl: z.string().url().max(500).refine(isHttpOrHttpsUrl, "Invite URL must use http:// or https://.")
 });
 var TenantRegisterSchema = z.object({
   businessName: z.string().trim().min(2).max(160),
@@ -1358,7 +1374,7 @@ var PaystackCheckoutSchema = z.object({
   billingCycle: BillingCycleSchema,
   channel: z.enum(["card", "mobile_money", "bank_transfer"]).default("mobile_money"),
   mobileMoneyNetwork: z.enum(["mtn", "telecel", "airteltigo", "unknown"]).optional(),
-  callbackUrl: z.string().url().max(500).optional()
+  callbackUrl: z.string().url().max(500).refine(isHttpOrHttpsUrl, "Callback URL must use http:// or https://.").optional()
 });
 var PaystackVerifySchema = z.object({
   organizationId: z.string().min(2).max(128).regex(ID_REGEX),
@@ -1501,6 +1517,15 @@ async function initializePaystackTransaction(params) {
   const payload = await res.json().catch(() => ({}));
   if (!res.ok || !payload.status || !payload.data) {
     throw new Error(payload.message || `Paystack initialization failed (${res.status}).`);
+  }
+  let parsedAuthUrl;
+  try {
+    parsedAuthUrl = new URL(payload.data.authorization_url);
+  } catch {
+    throw new Error("Paystack returned an invalid authorization URL.");
+  }
+  if (parsedAuthUrl.protocol !== "https:") {
+    throw new Error("Paystack authorization URL must use HTTPS.");
   }
   return payload.data;
 }
@@ -1686,8 +1711,14 @@ billingRouter.post(
   async (req, res) => {
     const signature = typeof req.headers["x-paystack-signature"] === "string" ? req.headers["x-paystack-signature"] : void 0;
     const secret = getPaystackWebhookSecret();
-    const rawPayload = req.rawBody ?? JSON.stringify(req.body || {});
-    if (!verifyPaystackWebhookSignature(rawPayload, signature, secret)) {
+    if (!Buffer.isBuffer(req.rawBody)) {
+      res.status(400).json({
+        error: "Raw webhook request body is required for signature verification.",
+        requestId: req.requestId
+      });
+      return;
+    }
+    if (!verifyPaystackWebhookSignature(req.rawBody, signature, secret)) {
       res.status(401).json({
         error: "Invalid Paystack webhook signature.",
         requestId: req.requestId
@@ -1719,12 +1750,22 @@ billingRouter.post(
       }
       if (eventName === "charge.success") {
         const paidAmountMinor = Number(data?.amount || 0);
+        const expectedCurrency = (payment.currency || "GHS").toUpperCase();
+        const paidCurrency = String(data?.currency || "").toUpperCase();
         if (paidAmountMinor < payment.amountMinor) {
           await handleFailedSubscriptionPayment({
             payment,
             reason: `Underpayment received (${paidAmountMinor} vs expected ${payment.amountMinor}).`
           });
           res.status(200).json({ received: true, status: "amount_mismatch" });
+          return;
+        }
+        if (paidCurrency && paidCurrency !== expectedCurrency) {
+          await handleFailedSubscriptionPayment({
+            payment,
+            reason: `Currency mismatch received (${paidCurrency} vs expected ${expectedCurrency}).`
+          });
+          res.status(200).json({ received: true, status: "currency_mismatch" });
           return;
         }
         await activatePaidSubscriptionFromPayment({
@@ -1755,7 +1796,7 @@ billingRouter.post(
 billingRouter.post(
   "/billing/checkout",
   requireFirebaseAuth,
-  requireTenantAccess({ permission: "settings.edit" }),
+  requireTenantAccess({ permission: "settings.manage" }),
   async (req, res) => {
     const parsed = PaystackCheckoutSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -1879,7 +1920,7 @@ billingRouter.post(
 billingRouter.post(
   "/billing/verify",
   requireFirebaseAuth,
-  requireTenantAccess({ permission: "settings.edit" }),
+  requireTenantAccess({ permission: "settings.manage" }),
   async (req, res) => {
     const parsed = PaystackVerifySchema.safeParse(req.body);
     if (!parsed.success) {
@@ -1924,10 +1965,20 @@ billingRouter.post(
         });
         return;
       }
+      const expectedCurrency = (payment.currency || "GHS").toUpperCase();
+      const verifiedCurrency = String(verified.currency || "").toUpperCase();
       if (Number(verified.amount || 0) < payment.amountMinor) {
         res.status(402).json({
           verified: false,
           error: "Verified amount does not cover the subscription price.",
+          requestId: req.requestId
+        });
+        return;
+      }
+      if (verifiedCurrency && verifiedCurrency !== expectedCurrency) {
+        res.status(402).json({
+          verified: false,
+          error: `Verified currency (${verifiedCurrency}) does not match expected currency (${expectedCurrency}).`,
           requestId: req.requestId
         });
         return;
@@ -1958,7 +2009,7 @@ billingRouter.post(
 billingRouter.post(
   "/billing/change-plan",
   requireFirebaseAuth,
-  requireTenantAccess({ permission: "settings.edit" }),
+  requireTenantAccess({ permission: "settings.manage" }),
   async (req, res) => {
     const parsed = PlanChangeSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -1998,6 +2049,7 @@ billingRouter.post(
       }
       const subRef = adminDb.collection("subscriptions").doc(tenant.subscriptionId);
       const isUpgrade = targetPlan.sortOrder > currentPlan.sortOrder;
+      const isDowngrade = targetPlan.sortOrder < currentPlan.sortOrder;
       if (isUpgrade && entitlements.effectiveStatus === "active") {
         res.status(402).json({
           requiresPayment: true,
@@ -2030,7 +2082,7 @@ billingRouter.post(
         });
         return;
       }
-      if (!isUpgrade && !immediate && entitlements.effectiveStatus === "active") {
+      if (isDowngrade && !immediate && entitlements.effectiveStatus === "active") {
         await subRef.update({
           pendingPlanId: targetPlan.planId,
           pendingBillingCycle: targetBillingCycle,
@@ -2054,7 +2106,7 @@ billingRouter.post(
         });
         return;
       }
-      if (!isUpgrade && immediate) {
+      if (isDowngrade && immediate && entitlements.effectiveStatus === "active") {
         await Promise.all([
           subRef.update({
             planId: targetPlan.planId,
@@ -2683,68 +2735,72 @@ platformAdminRouter.post(
     }
   }
 );
-platformAdminRouter.patch(
-  "/platform/tenants/:tenantId/status",
-  async (req, res) => {
-    const parsed = AdminTenantStatusSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: "Invalid status payload.", requestId: req.requestId });
-      return;
-    }
-    if (!adminDb || !req.platformAdmin) {
-      res.status(503).json({
-        error: "Database unavailable.",
-        code: "admin_sdk_iam_required",
-        requestId: req.requestId
-      });
-      return;
-    }
-    const tenantId = String(req.params.tenantId || "");
-    const { status, reason } = parsed.data;
-    try {
-      const tenantRef = adminDb.collection("tenants").doc(tenantId);
-      const tenantSnap = await tenantRef.get();
-      if (!tenantSnap.exists) {
-        res.status(404).json({ error: "Tenant not found.", requestId: req.requestId });
-        return;
-      }
-      const tenant = tenantSnap.data();
-      const batch = adminDb.batch();
-      batch.update(tenantRef, {
-        status,
-        ...status === "suspended" ? { suspensionReason: reason || "Suspended by Platform Administrator." } : { suspensionReason: FieldValue3.delete() },
-        updatedAt: FieldValue3.serverTimestamp()
-      });
-      batch.update(adminDb.collection("organizations").doc(tenantId), {
-        status,
-        updatedAt: FieldValue3.serverTimestamp()
-      });
-      if (tenant.subscriptionId) {
-        batch.update(adminDb.collection("subscriptions").doc(tenant.subscriptionId), {
-          status: status === "suspended" ? "suspended" : "active",
-          updatedAt: FieldValue3.serverTimestamp()
-        });
-      }
-      await batch.commit();
-      await writePlatformAuditLog({
-        actorUid: req.platformAdmin.uid,
-        actorEmail: req.platformAdmin.email,
-        targetTenantId: tenantId,
-        action: `platform.tenant_${status}`,
-        resourceType: "tenant",
-        resourceId: tenantId,
-        details: `Set tenant ${tenantId} status to ${status}${reason ? ` (${reason})` : ""}`
-      });
-      res.json({ updated: true, tenantId, status, requestId: req.requestId });
-    } catch (err) {
-      res.status(isAdminFirestorePermissionError(err) ? 503 : 500).json({
-        error: "Unable to update tenant status.",
-        code: isAdminFirestorePermissionError(err) ? "admin_sdk_iam_required" : "tenant_status_error",
-        requestId: req.requestId
-      });
-    }
+var handleTenantStatusUpdate = async (req, res) => {
+  const parsed = AdminTenantStatusSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid status payload.", requestId: req.requestId });
+    return;
   }
-);
+  if (!adminDb || !req.platformAdmin) {
+    res.status(503).json({
+      error: "Database unavailable.",
+      code: "admin_sdk_iam_required",
+      requestId: req.requestId
+    });
+    return;
+  }
+  const tenantIdParsed = PlanIdSchema.safeParse(String(req.params.tenantId || ""));
+  if (!tenantIdParsed.success) {
+    res.status(400).json({ error: "Invalid tenant ID.", requestId: req.requestId });
+    return;
+  }
+  const tenantId = tenantIdParsed.data;
+  const { status, reason } = parsed.data;
+  try {
+    const tenantRef = adminDb.collection("tenants").doc(tenantId);
+    const tenantSnap = await tenantRef.get();
+    if (!tenantSnap.exists) {
+      res.status(404).json({ error: "Tenant not found.", requestId: req.requestId });
+      return;
+    }
+    const tenant = tenantSnap.data();
+    const batch = adminDb.batch();
+    batch.update(tenantRef, {
+      status,
+      ...status === "suspended" ? { suspensionReason: reason || "Suspended by Platform Administrator." } : { suspensionReason: FieldValue3.delete() },
+      updatedAt: FieldValue3.serverTimestamp()
+    });
+    batch.update(adminDb.collection("organizations").doc(tenantId), {
+      status,
+      updatedAt: FieldValue3.serverTimestamp()
+    });
+    if (tenant.subscriptionId) {
+      batch.update(adminDb.collection("subscriptions").doc(tenant.subscriptionId), {
+        status: status === "suspended" ? "suspended" : "active",
+        updatedAt: FieldValue3.serverTimestamp()
+      });
+    }
+    await batch.commit();
+    await writePlatformAuditLog({
+      actorUid: req.platformAdmin.uid,
+      actorEmail: req.platformAdmin.email,
+      targetTenantId: tenantId,
+      action: `platform.tenant_${status}`,
+      resourceType: "tenant",
+      resourceId: tenantId,
+      details: `Set tenant ${tenantId} status to ${status}${reason ? ` (${reason})` : ""}`
+    });
+    res.json({ updated: true, tenantId, status, requestId: req.requestId });
+  } catch (err) {
+    res.status(isAdminFirestorePermissionError(err) ? 503 : 500).json({
+      error: "Unable to update tenant status.",
+      code: isAdminFirestorePermissionError(err) ? "admin_sdk_iam_required" : "tenant_status_error",
+      requestId: req.requestId
+    });
+  }
+};
+platformAdminRouter.patch("/platform/tenants/:tenantId/status", handleTenantStatusUpdate);
+platformAdminRouter.post("/platform/tenants/:tenantId/status", handleTenantStatusUpdate);
 platformAdminRouter.post(
   "/platform/tenants/:tenantId/subscription",
   async (req, res) => {
@@ -2765,7 +2821,12 @@ platformAdminRouter.post(
       });
       return;
     }
-    const tenantId = String(req.params.tenantId || "");
+    const tenantIdParsed = PlanIdSchema.safeParse(String(req.params.tenantId || ""));
+    if (!tenantIdParsed.success) {
+      res.status(400).json({ error: "Invalid tenant ID.", requestId: req.requestId });
+      return;
+    }
+    const tenantId = tenantIdParsed.data;
     const { planId, billingCycle, status, periodDays, customLimits } = parsed.data;
     try {
       const [plans, tenantSnap] = await Promise.all([
@@ -2836,62 +2897,76 @@ platformAdminRouter.post(
     }
   }
 );
-platformAdminRouter.put(
-  "/platform/plans/:planId",
-  async (req, res) => {
-    const parsed = AdminPlanUpdateSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        error: "Invalid plan configuration payload.",
-        issues: parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })),
-        requestId: req.requestId
-      });
-      return;
-    }
-    if (!adminDb || !req.platformAdmin) {
-      res.status(503).json({
-        error: "Database unavailable.",
-        code: "admin_sdk_iam_required",
-        requestId: req.requestId
-      });
-      return;
-    }
-    const planId = String(req.params.planId || "");
-    try {
-      const plans = await ensureDefaultPlansSeeded();
-      const existing = getPlanById(planId, plans);
-      const updatedPlan = {
-        ...existing,
-        ...parsed.data,
-        planId: existing.planId,
-        limits: parsed.data.limits ? { ...existing.limits, ...parsed.data.limits } : existing.limits,
-        features: parsed.data.features ? { ...existing.features, ...parsed.data.features } : existing.features
-      };
-      await adminDb.collection("plans").doc(planId).set(
-        {
-          ...updatedPlan,
-          updatedAt: FieldValue3.serverTimestamp()
-        },
-        { merge: true }
-      );
-      await writePlatformAuditLog({
-        actorUid: req.platformAdmin.uid,
-        actorEmail: req.platformAdmin.email,
-        action: "platform.plan_configured",
-        resourceType: "plan",
-        resourceId: planId,
-        details: `Updated plan ${updatedPlan.name} (monthly=${updatedPlan.monthlyPriceMinor}, annual=${updatedPlan.annualPriceMinor})`
-      });
-      res.json({ plan: updatedPlan, requestId: req.requestId });
-    } catch (err) {
-      res.status(isAdminFirestorePermissionError(err) ? 503 : 500).json({
-        error: "Unable to update subscription plan.",
-        code: isAdminFirestorePermissionError(err) ? "admin_sdk_iam_required" : "plan_update_error",
-        requestId: req.requestId
-      });
-    }
+var handlePlanConfigUpdate = async (req, res) => {
+  const parsed = AdminPlanUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      error: "Invalid plan configuration payload.",
+      issues: parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })),
+      requestId: req.requestId
+    });
+    return;
   }
-);
+  if (!adminDb || !req.platformAdmin) {
+    res.status(503).json({
+      error: "Database unavailable.",
+      code: "admin_sdk_iam_required",
+      requestId: req.requestId
+    });
+    return;
+  }
+  const planIdParsed = PlanIdSchema.safeParse(String(req.params.planId || ""));
+  if (!planIdParsed.success) {
+    res.status(400).json({ error: "Invalid plan ID.", requestId: req.requestId });
+    return;
+  }
+  const planId = planIdParsed.data;
+  try {
+    const plans = await ensureDefaultPlansSeeded();
+    const existing = plans.find((p) => p.planId === planId);
+    if (!existing) {
+      res.status(404).json({ error: "Subscription plan not found.", requestId: req.requestId });
+      return;
+    }
+    const updatedPlan = {
+      ...existing,
+      ...parsed.data,
+      planId: existing.planId,
+      limits: parsed.data.limits ? {
+        maxBranches: parsed.data.limits.maxBranches,
+        maxTerminals: parsed.data.limits.maxTerminals,
+        maxStaff: parsed.data.limits.maxStaff,
+        maxProducts: parsed.data.limits.maxProducts,
+        ...parsed.data.limits.fairUseProductCap !== void 0 ? { fairUseProductCap: parsed.data.limits.fairUseProductCap } : {}
+      } : existing.limits,
+      features: parsed.data.features ? { ...existing.features, ...parsed.data.features } : existing.features
+    };
+    await adminDb.collection("plans").doc(planId).set(
+      {
+        ...updatedPlan,
+        updatedAt: FieldValue3.serverTimestamp()
+      },
+      { merge: true }
+    );
+    await writePlatformAuditLog({
+      actorUid: req.platformAdmin.uid,
+      actorEmail: req.platformAdmin.email,
+      action: "platform.plan_configured",
+      resourceType: "plan",
+      resourceId: planId,
+      details: `Updated plan ${updatedPlan.name} (monthly=${updatedPlan.monthlyPriceMinor}, annual=${updatedPlan.annualPriceMinor})`
+    });
+    res.json({ plan: updatedPlan, requestId: req.requestId });
+  } catch (err) {
+    res.status(isAdminFirestorePermissionError(err) ? 503 : 500).json({
+      error: "Unable to update subscription plan.",
+      code: isAdminFirestorePermissionError(err) ? "admin_sdk_iam_required" : "plan_update_error",
+      requestId: req.requestId
+    });
+  }
+};
+platformAdminRouter.put("/platform/plans/:planId", handlePlanConfigUpdate);
+platformAdminRouter.post("/platform/plans/:planId", handlePlanConfigUpdate);
 platformAdminRouter.post(
   "/platform/overrides",
   async (req, res) => {
@@ -2952,98 +3027,106 @@ platformAdminRouter.post(
     }
   }
 );
-platformAdminRouter.patch(
-  "/platform/overrides/:overrideId/revoke",
-  async (req, res) => {
-    if (!adminDb || !req.platformAdmin) {
-      res.status(503).json({
-        error: "Database unavailable.",
-        code: "admin_sdk_iam_required",
-        requestId: req.requestId
-      });
-      return;
-    }
-    const overrideId = String(req.params.overrideId || "");
-    try {
-      const ref = adminDb.collection("featureOverrides").doc(overrideId);
-      const snap = await ref.get();
-      if (!snap.exists) {
-        res.status(404).json({ error: "Override not found.", requestId: req.requestId });
-        return;
-      }
-      const data = snap.data();
-      await ref.update({
-        status: "revoked",
-        updatedAt: FieldValue3.serverTimestamp()
-      });
-      await writePlatformAuditLog({
-        actorUid: req.platformAdmin.uid,
-        actorEmail: req.platformAdmin.email,
-        targetTenantId: data.tenantId,
-        action: "platform.override_revoked",
-        resourceType: "featureOverride",
-        resourceId: overrideId,
-        details: `Revoked override ${overrideId}`
-      });
-      res.json({ revoked: true, overrideId, requestId: req.requestId });
-    } catch (err) {
-      res.status(isAdminFirestorePermissionError(err) ? 503 : 500).json({
-        error: "Unable to revoke override.",
-        requestId: req.requestId
-      });
-    }
+var handleOverrideRevoke = async (req, res) => {
+  if (!adminDb || !req.platformAdmin) {
+    res.status(503).json({
+      error: "Database unavailable.",
+      code: "admin_sdk_iam_required",
+      requestId: req.requestId
+    });
+    return;
   }
-);
-platformAdminRouter.patch(
-  "/platform/support-tickets/:ticketId",
-  async (req, res) => {
-    const parsed = AdminTicketUpdateSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: "Invalid ticket update payload.", requestId: req.requestId });
-      return;
-    }
-    if (!adminDb || !req.platformAdmin) {
-      res.status(503).json({
-        error: "Database unavailable.",
-        code: "admin_sdk_iam_required",
-        requestId: req.requestId
-      });
-      return;
-    }
-    const ticketId = String(req.params.ticketId || "");
-    try {
-      const ref = adminDb.collection("supportTickets").doc(ticketId);
-      const snap = await ref.get();
-      if (!snap.exists) {
-        res.status(404).json({ error: "Support ticket not found.", requestId: req.requestId });
-        return;
-      }
-      const ticket = snap.data();
-      await ref.update({
-        ...parsed.data.status ? { status: parsed.data.status } : {},
-        ...parsed.data.priority ? { priority: parsed.data.priority } : {},
-        ...parsed.data.adminNotes !== void 0 ? { adminNotes: parsed.data.adminNotes } : {},
-        assignedTo: req.platformAdmin.email || req.platformAdmin.uid,
-        updatedAt: FieldValue3.serverTimestamp()
-      });
-      await writePlatformAuditLog({
-        actorUid: req.platformAdmin.uid,
-        actorEmail: req.platformAdmin.email,
-        targetTenantId: ticket.tenantId,
-        action: "platform.ticket_updated",
-        resourceType: "supportTicket",
-        resourceId: ticketId,
-        details: `Updated ticket ${ticketId}: ${Object.keys(parsed.data).join(", ")}`
-      });
-      res.json({ updated: true, ticketId, requestId: req.requestId });
-    } catch (err) {
-      res.status(isAdminFirestorePermissionError(err) ? 503 : 500).json({
-        error: "Unable to update support ticket.",
-        requestId: req.requestId
-      });
-    }
+  const overrideIdParsed = PlanIdSchema.safeParse(String(req.params.overrideId || ""));
+  if (!overrideIdParsed.success) {
+    res.status(400).json({ error: "Invalid override ID.", requestId: req.requestId });
+    return;
   }
-);
+  const overrideId = overrideIdParsed.data;
+  try {
+    const ref = adminDb.collection("featureOverrides").doc(overrideId);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      res.status(404).json({ error: "Override not found.", requestId: req.requestId });
+      return;
+    }
+    const data = snap.data();
+    await ref.update({
+      status: "revoked",
+      updatedAt: FieldValue3.serverTimestamp()
+    });
+    await writePlatformAuditLog({
+      actorUid: req.platformAdmin.uid,
+      actorEmail: req.platformAdmin.email,
+      targetTenantId: data.tenantId,
+      action: "platform.override_revoked",
+      resourceType: "featureOverride",
+      resourceId: overrideId,
+      details: `Revoked override ${overrideId}`
+    });
+    res.json({ revoked: true, overrideId, requestId: req.requestId });
+  } catch (err) {
+    res.status(isAdminFirestorePermissionError(err) ? 503 : 500).json({
+      error: "Unable to revoke override.",
+      requestId: req.requestId
+    });
+  }
+};
+platformAdminRouter.patch("/platform/overrides/:overrideId/revoke", handleOverrideRevoke);
+platformAdminRouter.post("/platform/overrides/:overrideId/revoke", handleOverrideRevoke);
+var handleTicketUpdate = async (req, res) => {
+  const parsed = AdminTicketUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid ticket update payload.", requestId: req.requestId });
+    return;
+  }
+  if (!adminDb || !req.platformAdmin) {
+    res.status(503).json({
+      error: "Database unavailable.",
+      code: "admin_sdk_iam_required",
+      requestId: req.requestId
+    });
+    return;
+  }
+  const ticketIdParsed = PlanIdSchema.safeParse(String(req.params.ticketId || ""));
+  if (!ticketIdParsed.success) {
+    res.status(400).json({ error: "Invalid ticket ID.", requestId: req.requestId });
+    return;
+  }
+  const ticketId = ticketIdParsed.data;
+  try {
+    const ref = adminDb.collection("supportTickets").doc(ticketId);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      res.status(404).json({ error: "Support ticket not found.", requestId: req.requestId });
+      return;
+    }
+    const ticket = snap.data();
+    await ref.update({
+      ...parsed.data.status ? { status: parsed.data.status } : {},
+      ...parsed.data.priority ? { priority: parsed.data.priority } : {},
+      ...parsed.data.adminNotes !== void 0 ? { adminNotes: parsed.data.adminNotes } : {},
+      assignedTo: req.platformAdmin.email || req.platformAdmin.uid,
+      updatedAt: FieldValue3.serverTimestamp()
+    });
+    await writePlatformAuditLog({
+      actorUid: req.platformAdmin.uid,
+      actorEmail: req.platformAdmin.email,
+      targetTenantId: ticket.tenantId,
+      action: "platform.ticket_updated",
+      resourceType: "supportTicket",
+      resourceId: ticketId,
+      details: `Updated ticket ${ticketId}: ${Object.keys(parsed.data).join(", ")}`
+    });
+    res.json({ updated: true, ticketId, requestId: req.requestId });
+  } catch (err) {
+    res.status(isAdminFirestorePermissionError(err) ? 503 : 500).json({
+      error: "Unable to update support ticket.",
+      requestId: req.requestId
+    });
+  }
+};
+platformAdminRouter.patch("/platform/support-tickets/:ticketId", handleTicketUpdate);
+platformAdminRouter.post("/platform/support-tickets/:ticketId", handleTicketUpdate);
 platformAdminRouter.post(
   "/platform/renewals/sweep",
   async (req, res) => {
@@ -3597,55 +3680,72 @@ saasRouter.post(
     }
   }
 );
+var handleTerminalUpdate = async (req, res) => {
+  const parsed = TerminalUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid terminal update payload.", requestId: req.requestId });
+    return;
+  }
+  if (!adminDb) {
+    res.status(503).json({
+      error: "Database unavailable.",
+      code: "admin_sdk_iam_required",
+      requestId: req.requestId
+    });
+    return;
+  }
+  const terminalIdParsed = PlanIdSchema.safeParse(String(req.params.terminalId || ""));
+  if (!terminalIdParsed.success) {
+    res.status(400).json({ error: "Invalid terminal ID.", requestId: req.requestId });
+    return;
+  }
+  const terminalId = terminalIdParsed.data;
+  const tenantId = req.tenantContext.tenantId;
+  try {
+    const ref = adminDb.collection("terminals").doc(terminalId);
+    const snap = await ref.get();
+    if (!snap.exists || snap.data()?.organizationId !== tenantId) {
+      res.status(404).json({ error: "POS terminal not found for your tenant.", requestId: req.requestId });
+      return;
+    }
+    if (parsed.data.status === "active" && snap.data()?.status === "suspended") {
+      const quota = await enforceQuotaServer(tenantId, "terminals", 1);
+      if (!quota.allowed) {
+        res.status(quota.statusCode).json({
+          error: quota.reason,
+          code: "quota_limit_reached",
+          requestId: req.requestId
+        });
+        return;
+      }
+    }
+    await ref.update({
+      ...parsed.data.name ? { name: parsed.data.name } : {},
+      ...parsed.data.deviceLabel !== void 0 ? { deviceLabel: parsed.data.deviceLabel } : {},
+      ...parsed.data.status ? { status: parsed.data.status } : {},
+      updatedAt: FieldValue4.serverTimestamp()
+    });
+    await computeLiveTenantUsage(tenantId);
+    res.json({ updated: true, terminalId, requestId: req.requestId });
+  } catch (err) {
+    res.status(isAdminFirestorePermissionError(err) ? 503 : 500).json({
+      error: "Unable to update POS terminal.",
+      code: isAdminFirestorePermissionError(err) ? "admin_sdk_iam_required" : "terminal_update_error",
+      requestId: req.requestId
+    });
+  }
+};
 saasRouter.patch(
   "/terminals/:terminalId",
   requireFirebaseAuth,
   requireTenantAccess({ permission: "branches.manage" }),
-  async (req, res) => {
-    const parsed = TerminalUpdateSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: "Invalid terminal update payload.", requestId: req.requestId });
-      return;
-    }
-    if (!adminDb) {
-      res.status(503).json({ error: "Database unavailable.", requestId: req.requestId });
-      return;
-    }
-    const terminalId = String(req.params.terminalId || "");
-    const tenantId = req.tenantContext.tenantId;
-    try {
-      const ref = adminDb.collection("terminals").doc(terminalId);
-      const snap = await ref.get();
-      if (!snap.exists || snap.data()?.organizationId !== tenantId) {
-        res.status(404).json({ error: "POS terminal not found for your tenant.", requestId: req.requestId });
-        return;
-      }
-      if (parsed.data.status === "active" && snap.data()?.status === "suspended") {
-        const quota = await enforceQuotaServer(tenantId, "terminals", 1);
-        if (!quota.allowed) {
-          res.status(quota.statusCode).json({
-            error: quota.reason,
-            code: "quota_limit_reached",
-            requestId: req.requestId
-          });
-          return;
-        }
-      }
-      await ref.update({
-        ...parsed.data.name ? { name: parsed.data.name } : {},
-        ...parsed.data.deviceLabel !== void 0 ? { deviceLabel: parsed.data.deviceLabel } : {},
-        ...parsed.data.status ? { status: parsed.data.status } : {},
-        updatedAt: FieldValue4.serverTimestamp()
-      });
-      await computeLiveTenantUsage(tenantId);
-      res.json({ updated: true, terminalId, requestId: req.requestId });
-    } catch (err) {
-      res.status(isAdminFirestorePermissionError(err) ? 503 : 500).json({
-        error: "Unable to update POS terminal.",
-        requestId: req.requestId
-      });
-    }
-  }
+  handleTerminalUpdate
+);
+saasRouter.post(
+  "/terminals/:terminalId",
+  requireFirebaseAuth,
+  requireTenantAccess({ permission: "branches.manage" }),
+  handleTerminalUpdate
 );
 
 // server/routes/api.ts
@@ -3910,6 +4010,11 @@ async function startServer() {
   );
   app.use(attachRequestContext);
   app.use("/api", apiRateLimiter, apiRouter);
+  app.use("/api", (req, res) => {
+    res.status(404).json({
+      error: `API route not found: ${req.method} ${req.originalUrl}`
+    });
+  });
   if (!isProd) {
     const vite = await createViteServer({
       server: { middlewareMode: true },

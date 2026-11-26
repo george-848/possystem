@@ -2,6 +2,15 @@ import { z } from 'zod';
 
 const ID_REGEX = /^[a-zA-Z0-9_\-]+$/;
 
+function isHttpOrHttpsUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 export const FeatureKeySchema = z.enum([
   'basic_pos',
   'basic_reports',
@@ -28,6 +37,7 @@ export const CheckoutVerifySchema = z.object({
   branchId: z.string().min(2).max(128).regex(ID_REGEX),
   terminalId: z.string().min(2).max(128).regex(ID_REGEX).optional(),
   defaultTaxRateBps: z.number().int().min(0).max(5000),
+  taxIncludedInPrice: z.boolean().optional(),
   orderDiscountMinor: z.number().int().min(0),
   items: z
     .array(
@@ -69,7 +79,11 @@ export const InvitationEmailSchema = z.object({
   organizationName: z.string().min(1).max(160),
   roleName: z.string().min(1).max(100),
   branchSummary: z.string().min(1).max(300),
-  inviteUrl: z.string().url().max(500),
+  inviteUrl: z
+    .string()
+    .url()
+    .max(500)
+    .refine(isHttpOrHttpsUrl, 'Invite URL must use http:// or https://.'),
 });
 
 export const TenantRegisterSchema = z.object({
@@ -121,7 +135,12 @@ export const PaystackCheckoutSchema = z.object({
   billingCycle: BillingCycleSchema,
   channel: z.enum(['card', 'mobile_money', 'bank_transfer']).default('mobile_money'),
   mobileMoneyNetwork: z.enum(['mtn', 'telecel', 'airteltigo', 'unknown']).optional(),
-  callbackUrl: z.string().url().max(500).optional(),
+  callbackUrl: z
+    .string()
+    .url()
+    .max(500)
+    .refine(isHttpOrHttpsUrl, 'Callback URL must use http:// or https://.')
+    .optional(),
 });
 
 export const PaystackVerifySchema = z.object({

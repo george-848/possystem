@@ -20,6 +20,7 @@ import {
   DEFAULT_SAAS_PLANS,
   evaluateTenantEntitlements,
   getPlanById,
+  mergePlansWithDefaults,
   type EffectiveEntitlements,
 } from '../lib/entitlements';
 import {
@@ -103,16 +104,10 @@ export function EntitlementProvider({ children }: { children: React.ReactNode })
     }
 
     const unsubPlans = onSnapshot(
-      collection(db, 'plans'),
+      query(collection(db, 'plans'), where('status', 'in', ['active', 'archived'])),
       (snap) => {
-        if (!snap.empty) {
-          const loaded = snap.docs
-            .map((d) => d.data() as SubscriptionPlan)
-            .sort((a, b) => a.sortOrder - b.sortOrder);
-          setPlans(loaded);
-        } else {
-          setPlans(DEFAULT_SAAS_PLANS);
-        }
+        const loaded = snap.docs.map((d) => d.data() as SubscriptionPlan);
+        setPlans(mergePlansWithDefaults(loaded));
       },
       () => setPlans(DEFAULT_SAAS_PLANS)
     );

@@ -8,7 +8,7 @@
         "organizationId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "businessName": { "type": "string", "minLength": 2, "maxLength": 160 },
         "registrationNumber": { "type": "string", "maxLength": 80 },
-        "logoUrl": { "type": "string", "maxLength": 1000 },
+        "logoUrl": { "type": "string", "maxLength": 65536 },
         "email": { "type": "string", "format": "email", "maxLength": 160 },
         "phone": { "type": "string", "maxLength": 40 },
         "address": { "type": "string", "maxLength": 300 },
@@ -552,6 +552,8 @@
         "expenseApprovalLimitMinor": { "type": "number" },
         "refundWindowDays": { "type": "number" },
         "lowStockNotificationsEnabled": { "type": "boolean" },
+        "taxIncludedInPrice": { "type": "boolean", "description": "When true, tax is extracted/deducted from the product selling price instead of added on top." },
+        "taxDisplayMode": { "type": "string", "enum": ["amount", "percentage"], "description": "Controls whether POS checkout, receipts, and closing reports show the tax currency amount or only the tax rate percentage." },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["settingId", "organizationId", "receiptHeader", "receiptFooter", "supportedPaymentMethods", "maxCashierDiscountPct", "expenseApprovalLimitMinor", "updatedAt"]

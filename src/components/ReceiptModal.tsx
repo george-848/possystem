@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Download, Printer, X } from 'lucide-react';
-import { formatDateTime, formatMoney } from '../lib/money';
+import { formatDateTime, formatMoney, formatTaxDisplayValue } from '../lib/money';
 import { resolveReceiptFields } from '../lib/receiptConfig';
+import { sanitizeImageSrc } from '../lib/url';
 import { downloadReceiptPdf } from '../services/posService';
 import type { Branch, Organization, Sale, SaleItem, SystemSettings } from '../types/pos';
 import { PrintOptionsModal } from './PrintOptionsModal';
@@ -71,9 +72,9 @@ export function ReceiptModal({
 
         <div className="p-6 overflow-y-auto font-mono text-xs text-slate-800 space-y-4">
           <div className="text-center space-y-1 border-b border-dashed border-slate-300 pb-4">
-            {rf.logo && organization.logoUrl && (
+            {rf.logo && sanitizeImageSrc(organization.logoUrl) && (
               <img
-                src={organization.logoUrl}
+                src={sanitizeImageSrc(organization.logoUrl)!}
                 alt={organization.businessName}
                 referrerPolicy="no-referrer"
                 className="h-10 mx-auto object-contain mb-2"
@@ -169,9 +170,17 @@ export function ReceiptModal({
             {rf.tax && (
               <div className="flex justify-between">
                 <span className="text-slate-500">
-                  Tax ({organization.taxLabel || 'VAT'})
+                  Tax ({organization.taxLabel || 'VAT'}
+                  {settings?.taxIncludedInPrice ? ' Incl.' : ''})
                 </span>
-                <span className="tabular-nums">{formatMoney(sale.taxMinor, sym)}</span>
+                <span className="tabular-nums">
+                  {formatTaxDisplayValue({
+                    taxMinor: sale.taxMinor,
+                    currencySymbol: sym,
+                    defaultTaxRateBps: organization.defaultTaxRateBps,
+                    taxDisplayMode: settings?.taxDisplayMode,
+                  })}
+                </span>
               </div>
             )}
             <div className="flex justify-between text-sm font-bold text-slate-900 pt-1">

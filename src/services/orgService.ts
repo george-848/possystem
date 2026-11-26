@@ -1,4 +1,5 @@
 import {
+  deleteField,
   doc,
   serverTimestamp,
   setDoc,
@@ -6,6 +7,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
+import { sanitizeImageSrc } from '../lib/url';
 import type { Branch, Organization, SystemSettings } from '../types/pos';
 import { cleanOptional, makeId, recordAuditLog } from './auditService';
 import { enforceServerEntitlement, registerTenantBusiness } from './saasService';
@@ -59,9 +61,25 @@ export async function updateOrganization(
   >
 ): Promise<void> {
   const path = `organizations/${organizationId}`;
+  const sanitizedUpdates: Record<string, unknown> = { ...updates };
+  if (updates.logoUrl !== undefined) {
+    const trimmed = updates.logoUrl.trim();
+    if (!trimmed) {
+      sanitizedUpdates.logoUrl = deleteField();
+    } else {
+      const safeSrc = sanitizeImageSrc(trimmed);
+      if (!safeSrc) {
+        throw new Error(
+          'Logo must be a valid http:// or https:// image URL, or an uploaded PNG/JPEG/WebP image under 64KB.'
+        );
+      }
+      sanitizedUpdates.logoUrl = safeSrc;
+    }
+  }
+
   try {
     await updateDoc(doc(db, 'organizations', organizationId), {
-      ...updates,
+      ...cleanOptional(sanitizedUpdates),
       updatedAt: serverTimestamp(),
     });
     await recordAuditLog({
@@ -69,7 +87,7 @@ export async function updateOrganization(
       action: 'organization.update',
       resourceType: 'organization',
       resourceId: organizationId,
-      details: `Updated organization configuration: ${Object.keys(updates).join(', ')}`,
+      details: `Updated organization configuration: ${Object.keys(sanitizedUpdates).join(', ')}`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
@@ -157,7 +175,7 @@ export async function updateBranch(
   const path = `branches/${branchId}`;
   try {
     await updateDoc(doc(db, 'branches', branchId), {
-      ...updates,
+      ...cleanOptional(updates),
       updatedAt: serverTimestamp(),
     });
     await recordAuditLog({

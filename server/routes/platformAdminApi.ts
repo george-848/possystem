@@ -37,6 +37,7 @@ import {
   AdminTenantCreateSchema,
   AdminTenantStatusSchema,
   AdminTicketUpdateSchema,
+  PlanIdSchema,
 } from '../validation/schemas.ts';
 
 export const platformAdminRouter = Router();
@@ -411,7 +412,12 @@ const handleTenantStatusUpdate = async (req: AuthenticatedRequest, res: Response
       return;
     }
 
-    const tenantId = String(req.params.tenantId || '');
+    const tenantIdParsed = PlanIdSchema.safeParse(String(req.params.tenantId || ''));
+    if (!tenantIdParsed.success) {
+      res.status(400).json({ error: 'Invalid tenant ID.', requestId: req.requestId });
+      return;
+    }
+    const tenantId = tenantIdParsed.data;
     const { status, reason } = parsed.data;
 
     try {
@@ -488,7 +494,12 @@ platformAdminRouter.post(
       return;
     }
 
-    const tenantId = String(req.params.tenantId || '');
+    const tenantIdParsed = PlanIdSchema.safeParse(String(req.params.tenantId || ''));
+    if (!tenantIdParsed.success) {
+      res.status(400).json({ error: 'Invalid tenant ID.', requestId: req.requestId });
+      return;
+    }
+    const tenantId = tenantIdParsed.data;
     const { planId, billingCycle, status, periodDays, customLimits } = parsed.data;
 
     try {
@@ -588,16 +599,33 @@ const handlePlanConfigUpdate = async (req: AuthenticatedRequest, res: Response) 
       return;
     }
 
-    const planId = String(req.params.planId || '');
+    const planIdParsed = PlanIdSchema.safeParse(String(req.params.planId || ''));
+    if (!planIdParsed.success) {
+      res.status(400).json({ error: 'Invalid plan ID.', requestId: req.requestId });
+      return;
+    }
+    const planId = planIdParsed.data;
     try {
       const plans = await ensureDefaultPlansSeeded();
-      const existing = getPlanById(planId, plans);
+      const existing = plans.find((p) => p.planId === planId);
+      if (!existing) {
+        res.status(404).json({ error: 'Subscription plan not found.', requestId: req.requestId });
+        return;
+      }
       const updatedPlan: SubscriptionPlan = {
         ...existing,
         ...parsed.data,
         planId: existing.planId,
         limits: parsed.data.limits
-          ? { ...existing.limits, ...parsed.data.limits }
+          ? {
+              maxBranches: parsed.data.limits.maxBranches,
+              maxTerminals: parsed.data.limits.maxTerminals,
+              maxStaff: parsed.data.limits.maxStaff,
+              maxProducts: parsed.data.limits.maxProducts,
+              ...(parsed.data.limits.fairUseProductCap !== undefined
+                ? { fairUseProductCap: parsed.data.limits.fairUseProductCap }
+                : {}),
+            }
           : existing.limits,
         features: parsed.data.features
           ? { ...existing.features, ...parsed.data.features }
@@ -714,7 +742,12 @@ const handleOverrideRevoke = async (req: AuthenticatedRequest, res: Response) =>
       return;
     }
 
-    const overrideId = String(req.params.overrideId || '');
+    const overrideIdParsed = PlanIdSchema.safeParse(String(req.params.overrideId || ''));
+    if (!overrideIdParsed.success) {
+      res.status(400).json({ error: 'Invalid override ID.', requestId: req.requestId });
+      return;
+    }
+    const overrideId = overrideIdParsed.data;
     try {
       const ref = adminDb.collection('featureOverrides').doc(overrideId);
       const snap = await ref.get();
@@ -767,7 +800,12 @@ const handleTicketUpdate = async (req: AuthenticatedRequest, res: Response) => {
       return;
     }
 
-    const ticketId = String(req.params.ticketId || '');
+    const ticketIdParsed = PlanIdSchema.safeParse(String(req.params.ticketId || ''));
+    if (!ticketIdParsed.success) {
+      res.status(400).json({ error: 'Invalid ticket ID.', requestId: req.requestId });
+      return;
+    }
+    const ticketId = ticketIdParsed.data;
     try {
       const ref = adminDb.collection('supportTickets').doc(ticketId);
       const snap = await ref.get();

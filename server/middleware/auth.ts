@@ -45,6 +45,7 @@ export function attachRequestContext(
 
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX_REQUESTS = 180;
+const RATE_CLEANUP_THRESHOLD = 1000;
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 
 export function apiRateLimiter(
@@ -54,6 +55,13 @@ export function apiRateLimiter(
 ): void {
   const key = req.ip || 'unknown';
   const now = Date.now();
+  if (rateBuckets.size > RATE_CLEANUP_THRESHOLD) {
+    for (const [entryKey, entryBucket] of rateBuckets.entries()) {
+      if (now > entryBucket.resetAt) {
+        rateBuckets.delete(entryKey);
+      }
+    }
+  }
   const bucket = rateBuckets.get(key);
   if (!bucket || now > bucket.resetAt) {
     rateBuckets.set(key, { count: 1, resetAt: now + RATE_WINDOW_MS });

@@ -19,10 +19,11 @@ import { useEntitlements } from '../contexts/EntitlementContext';
 import { useToast } from '../contexts/ToastContext';
 import {
   evaluatePlanChangeCompatibility,
-  FEATURE_CATALOG,
+  getIncrementalPlanFeatures,
   getPlanPriceMinor,
 } from '../lib/entitlements';
 import { formatDateTime, formatMoney } from '../lib/money';
+import { sanitizeHttpUrl } from '../lib/url';
 import {
   fetchTenantBillingHistory,
   initializeSubscriptionCheckout,
@@ -156,10 +157,10 @@ export default function BillingPage() {
         return;
       }
 
-      // If switching during free trial (Starter <-> Pro) or downgrading active plan
+      // If switching during free trial (Starter <-> Pro) or downgrading an active paid plan
       if (
         (entitlements.inTrial && plan.sortOrder <= 2) ||
-        plan.sortOrder < entitlements.plan.sortOrder
+        (entitlements.effectiveStatus === 'active' && plan.sortOrder < entitlements.plan.sortOrder)
       ) {
         const res = await requestSubscriptionPlanChange({
           organizationId: organization.organizationId,
@@ -191,9 +192,14 @@ export default function BillingPage() {
         callbackUrl: `${window.location.origin}/billing`,
       });
 
+      const safeCheckoutUrl = sanitizeHttpUrl(checkout.authorizationUrl, { httpsOnly: true });
+      if (!safeCheckoutUrl) {
+        throw new Error('Payment provider returned an invalid checkout URL.');
+      }
+
       setVerifyRefInput(checkout.reference);
       setPendingCheckoutUrl({
-        url: checkout.authorizationUrl,
+        url: safeCheckoutUrl,
         reference: checkout.reference,
         planName: plan.name,
       });
@@ -527,12 +533,25 @@ export default function BillingPage() {
                 </div>
 
                 <div className="border-t border-slate-100 pt-3 space-y-1.5">
-                  {FEATURE_CATALOG.filter((f) => plan.features?.[f.key]).map((f) => (
-                    <p key={f.key} className="text-xs text-slate-700 flex items-start gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
-                      <span>{f.label}</span>
-                    </p>
-                  ))}
+                  {(() => {
+                    const summary = getIncrementalPlanFeatures(plan, activePlans);
+                    return (
+                      <>
+                        {summary.includedFromPlanName && (
+                          <p className="text-xs font-semibold text-emerald-700">
+                            All in {summary.includedFromPlanName}
+                            {summary.additionalFeatures.length > 0 ? ', plus:' : ''}
+                          </p>
+                        )}
+                        {summary.additionalFeatures.map((f) => (
+                          <p key={f.key} className="text-xs text-slate-700 flex items-start gap-1.5">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                            <span>{f.label}</span>
+                          </p>
+                        ))}
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
 

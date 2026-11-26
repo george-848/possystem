@@ -6,6 +6,7 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
+import { sanitizeOptionalImageUrl } from '../lib/url';
 import type { Category, Product, StockMovementType } from '../types/pos';
 import { cleanOptional, createNotification, makeId, recordAuditLog } from './auditService';
 import { enforceServerEntitlement } from './saasService';
@@ -105,6 +106,11 @@ export async function createProduct(
   const productId = makeId('prd');
   const path = `products/${productId}`;
 
+  const safeImageUrl = sanitizeOptionalImageUrl(input.imageUrl);
+  if (input.imageUrl?.trim() && !safeImageUrl) {
+    throw new Error('Product image URL must be a valid http:// or https:// URL.');
+  }
+
   try {
     await setDoc(
       doc(db, 'products', productId),
@@ -118,7 +124,7 @@ export async function createProduct(
         description: input.description?.trim(),
         brand: input.brand?.trim(),
         unit: input.unit?.trim() || 'pcs',
-        imageUrl: input.imageUrl?.trim(),
+        imageUrl: safeImageUrl,
         costPriceMinor: Math.max(0, Math.round(input.costPriceMinor)),
         sellingPriceMinor: Math.max(0, Math.round(input.sellingPriceMinor)),
         wholesalePriceMinor:
@@ -195,9 +201,19 @@ export async function updateProduct(
   priceChanged = false
 ): Promise<void> {
   const path = `products/${productId}`;
+  const sanitizedUpdates = { ...updates };
+  if (sanitizedUpdates.imageUrl !== undefined) {
+    const trimmed = sanitizedUpdates.imageUrl.trim();
+    const safeUrl = sanitizeOptionalImageUrl(trimmed);
+    if (trimmed && !safeUrl) {
+      throw new Error('Product image URL must be a valid http:// or https:// URL.');
+    }
+    sanitizedUpdates.imageUrl = safeUrl;
+  }
+
   try {
     await updateDoc(doc(db, 'products', productId), {
-      ...updates,
+      ...cleanOptional(sanitizedUpdates),
       updatedAt: serverTimestamp(),
     });
     await recordAuditLog({
@@ -205,7 +221,7 @@ export async function updateProduct(
       action: priceChanged ? 'product.price_change' : 'product.update',
       resourceType: 'product',
       resourceId: productId,
-      details: `Updated product ${productId}: ${Object.keys(updates).join(', ')}`,
+      details: `Updated product ${productId}: ${Object.keys(sanitizedUpdates).join(', ')}`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
@@ -348,6 +364,246 @@ export async function adjustBranchInventory(params: {
   }
 }
 
+export interface BulkStockAdjustmentItemInput {
+  productId: string;
+  productName: string;
+  sku?: string;
+  movementType: StockMovementType;
+  quantityDelta: number;
+  setExactQuantity?: number;
+  reorderLevel?: number;
+  costPriceMinor?: number;
+  sellingPriceMinor?: number;
+}
+
+export interface BulkStockAdjustmentResult {
+  updatedCount: number;
+  lowStockCount: number;
+  failedItems: Array<{ productId: string; productName: string; error: string }>;
+}
+
+export async function bulkAdjustBranchInventory(params: {
+  organizationId: string;
+  branchId: string;
+  items: BulkStockAdjustmentItemInput[];
+  reason: string;
+}): Promise<BulkStockAdjustmentResult> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) throw new Error('Authentication required.');
+  if (params.items.length === 0) throw new Error('Select at least one item to adjust.');
+
+  const trimmedReason = params.reason.trim() || 'Bulk inventory adjustment';
+  const result: BulkStockAdjustmentResult = {
+    updatedCount: 0,
+    lowStockCount: 0,
+    failedItems: [],
+  };
+  const lowStockAlerts: Array<{ productName: string; newQty: number; reorder: number }> = [];
+  const auditSummaries: string[] = [];
+
+  const CHUNK_SIZE = 20;
+  for (let start = 0; start < params.items.length; start += CHUNK_SIZE) {
+    const chunk = params.items.slice(start, start + CHUNK_SIZE);
+    const chunkRefId = `${params.branchId}_${chunk[0].productId}`;
+
+    try {
+      const chunkLowAlerts: Array<{ productName: string; newQty: number; reorder: number }> = [];
+      const chunkSummaries: string[] = [];
+
+      await runTransaction(db, async (tx) => {
+        const orgRef = doc(db, 'organizations', params.organizationId);
+        const invRefs = chunk.map((item) =>
+          doc(db, 'branchInventory', `${params.branchId}_${item.productId}`)
+        );
+        const prodRefs = chunk.map((item) => doc(db, 'products', item.productId));
+
+        const [orgSnap, ...otherSnaps] = await Promise.all([
+          tx.get(orgRef),
+          ...invRefs.map((r) => tx.get(r)),
+          ...prodRefs.map((r) => tx.get(r)),
+        ]);
+
+        if (!orgSnap.exists()) throw new Error('Organization not found.');
+        const allowNegative = Boolean(orgSnap.data().allowNegativeInventory);
+        const invSnaps = otherSnaps.slice(0, chunk.length);
+        const prodSnaps = otherSnaps.slice(chunk.length);
+
+        const prepared = chunk.map((item, idx) => {
+          const invSnap = invSnaps[idx];
+          const prodSnap = prodSnaps[idx];
+          const prodData = prodSnap.exists() ? (prodSnap.data() as Product) : null;
+          const prevQty = invSnap.exists() ? Number(invSnap.data().quantityAvailable || 0) : 0;
+          const newQty =
+            item.setExactQuantity !== undefined
+              ? Math.round(item.setExactQuantity)
+              : prevQty + Math.round(item.quantityDelta);
+
+          if (!allowNegative && newQty < 0) {
+            throw new Error(
+              `Negative stock prevented for "${item.productName}" (current: ${prevQty}, attempted: ${newQty}).`
+            );
+          }
+
+          const finalReorder =
+            item.reorderLevel ??
+            (invSnap.exists()
+              ? Number(invSnap.data().reorderLevel)
+              : prodData?.minimumStock ?? 5);
+          const costPriceMinor =
+            item.costPriceMinor ??
+            (invSnap.exists()
+              ? Number(invSnap.data().costPriceMinor)
+              : prodData?.costPriceMinor ?? 0);
+          const sellingPriceMinor =
+            item.sellingPriceMinor ??
+            (invSnap.exists()
+              ? Number(invSnap.data().sellingPriceMinor)
+              : prodData?.sellingPriceMinor ?? 0);
+
+          return {
+            item,
+            invRef: invRefs[idx],
+            invExists: invSnap.exists(),
+            prevQty,
+            newQty,
+            finalReorder,
+            costPriceMinor,
+            sellingPriceMinor,
+          };
+        });
+
+        for (const row of prepared) {
+          const inventoryId = `${params.branchId}_${row.item.productId}`;
+          if (row.invExists) {
+            tx.update(row.invRef, {
+              quantityAvailable: row.newQty,
+              reorderLevel: row.finalReorder,
+              costPriceMinor: row.costPriceMinor,
+              sellingPriceMinor: row.sellingPriceMinor,
+              updatedAt: serverTimestamp(),
+            });
+          } else {
+            tx.set(row.invRef, {
+              inventoryId,
+              organizationId: params.organizationId,
+              branchId: params.branchId,
+              productId: row.item.productId,
+              quantityAvailable: row.newQty,
+              reorderLevel: row.finalReorder,
+              costPriceMinor: row.costPriceMinor,
+              sellingPriceMinor: row.sellingPriceMinor,
+              updatedAt: serverTimestamp(),
+            });
+          }
+
+          const movementId = makeId('mov');
+          tx.set(
+            doc(db, 'stockMovements', movementId),
+            cleanOptional({
+              movementId,
+              organizationId: params.organizationId,
+              branchId: params.branchId,
+              productId: row.item.productId,
+              movementType: row.item.movementType,
+              quantity: row.newQty - row.prevQty,
+              previousQuantity: row.prevQty,
+              newQuantity: row.newQty,
+              referenceType: 'bulk_adjustment',
+              referenceId: inventoryId,
+              reason: trimmedReason,
+              performedBy: currentUser.uid,
+              createdAt: serverTimestamp(),
+            })
+          );
+
+          chunkSummaries.push(`${row.item.sku || row.item.productName}: ${row.prevQty}->${row.newQty}`);
+          if (row.newQty <= row.finalReorder) {
+            chunkLowAlerts.push({
+              productName: row.item.productName,
+              newQty: row.newQty,
+              reorder: row.finalReorder,
+            });
+          }
+        }
+      });
+
+      result.updatedCount += chunk.length;
+      lowStockAlerts.push(...chunkLowAlerts);
+      auditSummaries.push(...chunkSummaries);
+    } catch (chunkErr) {
+      if (chunk.length === 1) {
+        result.failedItems.push({
+          productId: chunk[0].productId,
+          productName: chunk[0].productName,
+          error:
+            chunkErr instanceof Error ? chunkErr.message : 'Unable to adjust stock for item.',
+        });
+      } else {
+        // Retry individually so valid items still succeed and exact failing SKU is reported
+        for (const singleItem of chunk) {
+          try {
+            await adjustBranchInventory({
+              organizationId: params.organizationId,
+              branchId: params.branchId,
+              productId: singleItem.productId,
+              productName: singleItem.productName,
+              movementType: singleItem.movementType,
+              quantityDelta: singleItem.quantityDelta,
+              setExactQuantity: singleItem.setExactQuantity,
+              reorderLevel: singleItem.reorderLevel,
+              costPriceMinor: singleItem.costPriceMinor,
+              sellingPriceMinor: singleItem.sellingPriceMinor,
+              reason: trimmedReason,
+            });
+            result.updatedCount += 1;
+            auditSummaries.push(`${singleItem.sku || singleItem.productName}: adjusted`);
+          } catch (singleErr) {
+            result.failedItems.push({
+              productId: singleItem.productId,
+              productName: singleItem.productName,
+              error:
+                singleErr instanceof Error
+                  ? singleErr.message
+                  : `Unable to adjust stock (${chunkRefId}).`,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  result.lowStockCount = lowStockAlerts.length;
+  if (lowStockAlerts.length > 0) {
+    const previewNames = lowStockAlerts
+      .slice(0, 4)
+      .map((a) => `${a.productName} (${a.newQty})`)
+      .join(', ');
+    await createNotification({
+      organizationId: params.organizationId,
+      branchId: params.branchId,
+      type: 'low_stock',
+      title: `Bulk Adjustment: ${lowStockAlerts.length} Low Stock Alert(s)`,
+      message: `${previewNames}${lowStockAlerts.length > 4 ? ` +${lowStockAlerts.length - 4} more` : ''} reached reorder level.`,
+    });
+  }
+
+  if (result.updatedCount > 0) {
+    await recordAuditLog({
+      organizationId: params.organizationId,
+      branchId: params.branchId,
+      action: 'inventory.bulk_adjust',
+      resourceType: 'branchInventory',
+      resourceId: params.branchId,
+      details: `Bulk adjusted ${result.updatedCount} item(s) (${trimmedReason}): ${auditSummaries.slice(0, 12).join('; ')}`.slice(
+        0,
+        950
+      ),
+    });
+  }
+
+  return result;
+}
+
 export interface BulkImportRowInput {
   rowNumber: number;
   action: 'create' | 'update';
@@ -451,7 +707,7 @@ export async function importProductsBatch(params: {
               description: row.description?.trim(),
               brand: row.brand?.trim(),
               unit: row.unit?.trim() || 'pcs',
-              imageUrl: row.imageUrl?.trim(),
+              imageUrl: sanitizeOptionalImageUrl(row.imageUrl),
               costPriceMinor: Math.max(0, Math.round(row.costPriceMinor)),
               sellingPriceMinor: Math.max(0, Math.round(row.sellingPriceMinor)),
               wholesalePriceMinor:
@@ -485,7 +741,7 @@ export async function importProductsBatch(params: {
               description: row.description?.trim(),
               brand: row.brand?.trim(),
               unit: row.unit?.trim() || 'pcs',
-              imageUrl: row.imageUrl?.trim(),
+              imageUrl: sanitizeOptionalImageUrl(row.imageUrl),
               costPriceMinor: Math.max(0, Math.round(row.costPriceMinor)),
               sellingPriceMinor: Math.max(0, Math.round(row.sellingPriceMinor)),
               wholesalePriceMinor:

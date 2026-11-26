@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertCircle, ExternalLink, Printer, X } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
-import { formatDateTime, formatMoney } from '../lib/money';
+import { formatDateTime, formatMoney, formatTaxDisplayValue } from '../lib/money';
 import { resolveReceiptFields } from '../lib/receiptConfig';
+import { sanitizeImageSrc } from '../lib/url';
 import type { Branch, Organization, Sale, SaleItem, SystemSettings } from '../types/pos';
 import {
   BarcodeLabelsSheet,
@@ -106,9 +107,9 @@ function ReceiptSheet({
       }`}
     >
       <div className="text-center space-y-1 border-b border-dashed border-slate-400 pb-3">
-        {rf.logo && organization.logoUrl && (
+        {rf.logo && sanitizeImageSrc(organization.logoUrl) && (
           <img
-            src={organization.logoUrl}
+            src={sanitizeImageSrc(organization.logoUrl)!}
             alt={organization.businessName}
             referrerPolicy="no-referrer"
             className="h-9 mx-auto object-contain mb-1.5"
@@ -199,8 +200,18 @@ function ReceiptSheet({
         )}
         {rf.tax && (
           <div className="flex justify-between">
-            <span className="text-slate-600">Tax ({organization.taxLabel || 'VAT'})</span>
-            <span className="tabular-nums">{formatMoney(sale.taxMinor, sym)}</span>
+            <span className="text-slate-600">
+              Tax ({organization.taxLabel || 'VAT'}
+              {settings?.taxIncludedInPrice ? ' Incl.' : ''})
+            </span>
+            <span className="tabular-nums">
+              {formatTaxDisplayValue({
+                taxMinor: sale.taxMinor,
+                currencySymbol: sym,
+                defaultTaxRateBps: organization.defaultTaxRateBps,
+                taxDisplayMode: settings?.taxDisplayMode,
+              })}
+            </span>
           </div>
         )}
         <div className="flex justify-between text-sm font-bold text-slate-950 pt-1">

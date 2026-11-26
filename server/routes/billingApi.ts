@@ -253,9 +253,15 @@ billingRouter.post(
         ? req.headers['x-paystack-signature']
         : undefined;
     const secret = getPaystackWebhookSecret();
-    const rawPayload = req.rawBody ?? JSON.stringify(req.body || {});
+    if (!Buffer.isBuffer(req.rawBody)) {
+      res.status(400).json({
+        error: 'Raw webhook request body is required for signature verification.',
+        requestId: req.requestId,
+      });
+      return;
+    }
 
-    if (!verifyPaystackWebhookSignature(rawPayload, signature, secret)) {
+    if (!verifyPaystackWebhookSignature(req.rawBody, signature, secret)) {
       res.status(401).json({
         error: 'Invalid Paystack webhook signature.',
         requestId: req.requestId,
@@ -322,12 +328,22 @@ billingRouter.post(
 
       if (eventName === 'charge.success') {
         const paidAmountMinor = Number(data?.amount || 0);
+        const expectedCurrency = (payment.currency || 'GHS').toUpperCase();
+        const paidCurrency = String(data?.currency || '').toUpperCase();
         if (paidAmountMinor < payment.amountMinor) {
           await handleFailedSubscriptionPayment({
             payment,
             reason: `Underpayment received (${paidAmountMinor} vs expected ${payment.amountMinor}).`,
           });
           res.status(200).json({ received: true, status: 'amount_mismatch' });
+          return;
+        }
+        if (paidCurrency && paidCurrency !== expectedCurrency) {
+          await handleFailedSubscriptionPayment({
+            payment,
+            reason: `Currency mismatch received (${paidCurrency} vs expected ${expectedCurrency}).`,
+          });
+          res.status(200).json({ received: true, status: 'currency_mismatch' });
           return;
         }
 
@@ -561,10 +577,20 @@ billingRouter.post(
         return;
       }
 
+      const expectedCurrency = (payment.currency || 'GHS').toUpperCase();
+      const verifiedCurrency = String(verified.currency || '').toUpperCase();
       if (Number(verified.amount || 0) < payment.amountMinor) {
         res.status(402).json({
           verified: false,
           error: 'Verified amount does not cover the subscription price.',
+          requestId: req.requestId,
+        });
+        return;
+      }
+      if (verifiedCurrency && verifiedCurrency !== expectedCurrency) {
+        res.status(402).json({
+          verified: false,
+          error: `Verified currency (${verifiedCurrency}) does not match expected currency (${expectedCurrency}).`,
           requestId: req.requestId,
         });
         return;
@@ -646,6 +672,8 @@ billingRouter.post(
 
       // Paid upgrade requires Paystack checkout (unless still in free trial switching to Starter/Pro trial or immediate downgrade)
       const isUpgrade = targetPlan.sortOrder > currentPlan.sortOrder;
+      const isDowngrade = targetPlan.sortOrder < currentPlan.sortOrder;
+
       if (isUpgrade && entitlements.effectiveStatus === 'active') {
         res.status(402).json({
           requiresPayment: true,
@@ -681,7 +709,7 @@ billingRouter.post(
       }
 
       // Downgrade on active paid subscription: schedule for end of current period unless immediate requested
-      if (!isUpgrade && !immediate && entitlements.effectiveStatus === 'active') {
+      if (isDowngrade && !immediate && entitlements.effectiveStatus === 'active') {
         await subRef.update({
           pendingPlanId: targetPlan.planId,
           pendingBillingCycle: targetBillingCycle,
@@ -706,8 +734,8 @@ billingRouter.post(
         return;
       }
 
-      // Immediate downgrade
-      if (!isUpgrade && immediate) {
+      // Immediate downgrade on active paid subscription
+      if (isDowngrade && immediate && entitlements.effectiveStatus === 'active') {
         await Promise.all([
           subRef.update({
             planId: targetPlan.planId,

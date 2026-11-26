@@ -9,13 +9,17 @@ import {
   Minus,
   Monitor,
   Package,
+  PauseCircle,
+  Percent,
   Plus,
+  Receipt,
   Search,
   ShoppingCart,
   Trash2,
   UserPlus,
   Volume2,
   VolumeX,
+  Wallet,
   X,
   Zap,
 } from 'lucide-react';
@@ -23,6 +27,15 @@ import {
   BarcodeScannerModal,
   type ScanFeedbackState,
 } from '../components/BarcodeScannerModal';
+import {
+  HeldOrdersModal,
+  HoldOrderModal,
+  RecentReceiptsModal,
+  ShiftDrawerModal,
+  loadHeldOrders,
+  saveHeldOrders,
+  type HeldOrderRecord,
+} from '../components/PosTerminalModals';
 import { ReceiptModal } from '../components/ReceiptModal';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
@@ -38,12 +51,14 @@ import {
   calculateLineAmounts,
   calculateOrderTotals,
   formatMoney,
+  formatTaxDisplayValue,
   fromMinorUnits,
   toMinorUnits,
 } from '../lib/money';
+import { sanitizeHttpUrl } from '../lib/url';
 import { makeId } from '../services/auditService';
 import { createCustomer } from '../services/operationsService';
-import { processPosSale, type PosPaymentSplit } from '../services/posService';
+import { fetchSaleItems, processPosSale, type PosPaymentSplit } from '../services/posService';
 import type { Product, Sale, SaleItem, SinglePaymentMethod } from '../types/pos';
 
 interface CartLine {
@@ -64,7 +79,7 @@ export function PosTerminalPage() {
     systemSettings,
     hasPermission,
   } = useAuth();
-  const { products, categories, branchInventory, customers, cashSessions } = useData();
+  const { products, categories, branchInventory, customers, cashSessions, sales } = useData();
   const { terminals, entitlements } = useEntitlements();
   const { notify } = useToast();
 
@@ -86,8 +101,19 @@ export function PosTerminalPage() {
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [cart, setCart] = useState<CartLine[]>([]);
   const [orderDiscountInput, setOrderDiscountInput] = useState('0');
+  const [orderNote, setOrderNote] = useState('');
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
   const [idempotencyKey, setIdempotencyKey] = useState(() => makeId('idem'));
+
+  // Hold / Park orders
+  const [heldOrders, setHeldOrders] = useState<HeldOrderRecord[]>([]);
+  const [showHoldModal, setShowHoldModal] = useState(false);
+  const [showHeldOrders, setShowHeldOrders] = useState(false);
+
+  // Recent branch receipts & shift drawer peek
+  const [showRecentReceipts, setShowRecentReceipts] = useState(false);
+  const [loadingReprintId, setLoadingReprintId] = useState<string | null>(null);
+  const [showShiftDrawer, setShowShiftDrawer] = useState(false);
 
   // Barcode utility states
   const barcodeInputRef = useRef<HTMLInputElement | null>(null);
@@ -109,6 +135,7 @@ export function PosTerminalPage() {
   const [splitPayments, setSplitPayments] = useState<
     Array<{ method: SinglePaymentMethod; amountStr: string; reference: string }>
   >([{ method: 'cash', amountStr: '', reference: '' }]);
+  const [activeSplitIdx, setActiveSplitIdx] = useState(0);
   const [processingSale, setProcessingSale] = useState(false);
 
   // Receipt modal
@@ -117,6 +144,7 @@ export function PosTerminalPage() {
 
   const sym = organization?.currencySymbol || 'GH₵';
   const defaultTaxRateBps = organization?.defaultTaxRateBps || 0;
+  const taxIncludedInPrice = Boolean(systemSettings?.taxIncludedInPrice);
   const allowNegative = Boolean(organization?.allowNegativeInventory);
   const canApplyDiscounts = hasPermission('sales.edit');
   const maxDiscountPct = systemSettings?.maxCashierDiscountPct ?? 10;
@@ -136,6 +164,35 @@ export function PosTerminalPage() {
           c.status === 'open'
       ) || null,
     [cashSessions, activeBranchId, userProfile]
+  );
+
+  const branchSales = useMemo(
+    () => sales.filter((s) => s.branchId === activeBranchId),
+    [sales, activeBranchId]
+  );
+
+  const selectedCustomer = useMemo(
+    () => customers.find((c) => c.customerId === selectedCustomerId) || null,
+    [customers, selectedCustomerId]
+  );
+
+  // Sync parked/held orders for current organization + branch
+  useEffect(() => {
+    if (!organization?.organizationId || !activeBranchId) {
+      setHeldOrders([]);
+      return;
+    }
+    setHeldOrders(loadHeldOrders(organization.organizationId, activeBranchId));
+  }, [organization?.organizationId, activeBranchId]);
+
+  const persistHeldOrders = useCallback(
+    (next: HeldOrderRecord[]) => {
+      setHeldOrders(next);
+      if (organization?.organizationId && activeBranchId) {
+        saveHeldOrders(organization.organizationId, activeBranchId, next);
+      }
+    },
+    [organization?.organizationId, activeBranchId]
   );
 
   const inventoryByProduct = useMemo(() => {
@@ -293,7 +350,19 @@ export function PosTerminalPage() {
   const processScannedCodeRef = useRef(processScannedCode);
   processScannedCodeRef.current = processScannedCode;
 
-  // Global Hardware Keyboard-Wedge Scanner Listener + F2 focus shortcut
+  const anyModalOpen =
+    showPayment ||
+    showNewCustomer ||
+    showCameraScanner ||
+    showHoldModal ||
+    showHeldOrders ||
+    showRecentReceipts ||
+    showShiftDrawer ||
+    Boolean(receiptSale);
+
+  const openPaymentModalRef = useRef<() => void>(() => {});
+
+  // Global Hardware Keyboard-Wedge Scanner Listener + F2/F8/F9/Esc shortcuts
   useEffect(() => {
     let buffer = '';
     let lastKeyAt = 0;
@@ -306,7 +375,30 @@ export function PosTerminalPage() {
         return;
       }
 
-      if (!wedgeEnabled || showPayment || showNewCustomer || showCameraScanner || Boolean(receiptSale)) {
+      if (e.key === 'Escape' && anyModalOpen) {
+        e.preventDefault();
+        setShowPayment(false);
+        setShowNewCustomer(false);
+        setShowHoldModal(false);
+        setShowHeldOrders(false);
+        setShowRecentReceipts(false);
+        setShowShiftDrawer(false);
+        return;
+      }
+
+      if (e.key === 'F8' && !anyModalOpen && cartRef.current.length > 0) {
+        e.preventDefault();
+        setShowHoldModal(true);
+        return;
+      }
+
+      if (e.key === 'F9' && !anyModalOpen && cartRef.current.length > 0) {
+        e.preventDefault();
+        openPaymentModalRef.current();
+        return;
+      }
+
+      if (!wedgeEnabled || anyModalOpen) {
         return;
       }
 
@@ -355,7 +447,7 @@ export function PosTerminalPage() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [wedgeEnabled, showPayment, showNewCustomer, showCameraScanner, receiptSale]);
+  }, [wedgeEnabled, anyModalOpen]);
 
   // Initial focus on barcode field when entering POS terminal
   useEffect(() => {
@@ -389,6 +481,21 @@ export function PosTerminalPage() {
     );
   };
 
+  const setCartLineQty = (productId: string, rawQtyStr: string) => {
+    const parsed = Number.parseInt(rawQtyStr, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+    setCart((prev) =>
+      prev.map((c) => {
+        if (c.product.productId !== productId) return c;
+        if (!allowNegative && parsed > c.availableStock) {
+          notify('error', 'Stock Limit Reached', `Only ${c.availableStock} available.`);
+          return { ...c, quantity: Math.max(1, c.availableStock) };
+        }
+        return { ...c, quantity: parsed };
+      })
+    );
+  };
+
   const updateLineDiscount = (productId: string, discountStr: string) => {
     if (!canApplyDiscounts) return;
     const rawMinor = Math.max(0, toMinorUnits(discountStr));
@@ -401,10 +508,32 @@ export function PosTerminalPage() {
     );
   };
 
+  const afterLineDiscountsMinor = useMemo(
+    () =>
+      cart.reduce((sum, c) => {
+        const gross = Math.max(0, Math.round(c.unitPriceMinor * c.quantity));
+        return sum + Math.max(0, gross - c.discountMinor);
+      }, 0),
+    [cart]
+  );
+
+  const maxOrderDiscountMinor = useMemo(() => {
+    if (!canApplyDiscounts) return 0;
+    return Math.round((afterLineDiscountsMinor * maxDiscountPct) / 100);
+  }, [canApplyDiscounts, afterLineDiscountsMinor, maxDiscountPct]);
+
   const orderDiscountMinor = useMemo(() => {
     if (!canApplyDiscounts) return 0;
-    return Math.max(0, toMinorUnits(orderDiscountInput));
-  }, [canApplyDiscounts, orderDiscountInput]);
+    const raw = Math.max(0, toMinorUnits(orderDiscountInput));
+    return Math.min(raw, maxOrderDiscountMinor);
+  }, [canApplyDiscounts, orderDiscountInput, maxOrderDiscountMinor]);
+
+  const applyOrderDiscountPct = (pct: number) => {
+    if (!canApplyDiscounts) return;
+    const safePct = Math.min(Math.max(0, pct), maxDiscountPct);
+    const amountMinor = Math.round((afterLineDiscountsMinor * safePct) / 100);
+    setOrderDiscountInput(amountMinor > 0 ? fromMinorUnits(amountMinor).toFixed(2) : '0');
+  };
 
   const totals = useMemo(() => {
     return calculateOrderTotals(
@@ -416,12 +545,14 @@ export function PosTerminalPage() {
         taxCategory: c.product.taxCategory,
       })),
       orderDiscountMinor,
-      defaultTaxRateBps
+      defaultTaxRateBps,
+      taxIncludedInPrice
     );
-  }, [cart, orderDiscountMinor, defaultTaxRateBps]);
+  }, [cart, orderDiscountMinor, defaultTaxRateBps, taxIncludedInPrice]);
 
-  const openPaymentModal = () => {
+  const openPaymentModal = useCallback(() => {
     if (cart.length === 0) return;
+    if (entitlements && !entitlements.isOperational) return;
     setSplitPayments([
       {
         method: supportedMethods[0] || 'cash',
@@ -429,13 +560,165 @@ export function PosTerminalPage() {
         reference: '',
       },
     ]);
+    setActiveSplitIdx(0);
     setShowPayment(true);
-  };
+  }, [cart.length, entitlements, supportedMethods, totals.totalMinor]);
+
+  openPaymentModalRef.current = openPaymentModal;
 
   const totalTenderedMinor = useMemo(
     () => splitPayments.reduce((s, p) => s + Math.max(0, toMinorUnits(p.amountStr)), 0),
     [splitPayments]
   );
+
+  const remainingDueMinor = Math.max(0, totals.totalMinor - totalTenderedMinor);
+
+  const quickCashSuggestionsMinor = useMemo(() => {
+    const due = totals.totalMinor;
+    if (due <= 0) return [];
+    const baseBillsMinor = [1000, 2000, 5000, 10000, 20000];
+    const nextTenMinor = Math.ceil(due / 1000) * 1000;
+    const nextFiftyMinor = Math.ceil(due / 5000) * 5000;
+    const set = new Set<number>([due, nextTenMinor, nextFiftyMinor, ...baseBillsMinor.filter((b) => b >= due)]);
+    return Array.from(set).sort((a, b) => a - b).slice(0, 5);
+  }, [totals.totalMinor]);
+
+  const applyQuickTenderAmount = (amountMinor: number) => {
+    setSplitPayments((prev) => {
+      const targetIdx =
+        prev[activeSplitIdx] !== undefined
+          ? activeSplitIdx
+          : Math.max(
+              0,
+              prev.findIndex((row) => row.method === 'cash')
+            );
+      return prev.map((row, idx) =>
+        idx === targetIdx ? { ...row, amountStr: fromMinorUnits(amountMinor).toFixed(2) } : row
+      );
+    });
+  };
+
+  const handleParkOrder = (label: string, note: string) => {
+    if (cart.length === 0 || !userProfile) return;
+    const cust = customers.find((c) => c.customerId === selectedCustomerId);
+    const parked: HeldOrderRecord = {
+      holdId: makeId('hold'),
+      referenceLabel: label,
+      orderNote: note || undefined,
+      customerId: selectedCustomerId,
+      customerName: cust?.fullName,
+      orderDiscountInput,
+      cashierName: userProfile.fullName,
+      createdAt: new Date().toISOString(),
+      items: cart.map((c) => ({
+        productId: c.product.productId,
+        sku: c.product.sku,
+        productName: c.product.name,
+        quantity: c.quantity,
+        unitPriceMinor: c.unitPriceMinor,
+        discountMinor: c.discountMinor,
+      })),
+      itemCount: cart.reduce((s, c) => s + c.quantity, 0),
+      totalMinor: totals.totalMinor,
+    };
+    persistHeldOrders([parked, ...heldOrders]);
+    setCart([]);
+    setOrderDiscountInput('0');
+    setOrderNote('');
+    setSelectedCustomerId('');
+    setShowHoldModal(false);
+    notify('success', 'Order Parked', `"${parked.referenceLabel}" saved to Held Orders.`);
+    window.setTimeout(() => barcodeInputRef.current?.focus(), 50);
+  };
+
+  const handleResumeHeldOrder = (order: HeldOrderRecord, mode: 'replace' | 'merge') => {
+    const productMap = new Map(products.map((p) => [p.productId, p]));
+    const nextLines: CartLine[] = mode === 'merge' ? [...cart] : [];
+    const warnings: string[] = [];
+
+    for (const heldItem of order.items) {
+      const prod = productMap.get(heldItem.productId);
+      const inv = inventoryByProduct.get(heldItem.productId);
+      if (!prod || !inv || !isProductAvailableAtBranch(prod, activeBranchId)) {
+        warnings.push(`${heldItem.productName} is no longer stocked at this branch`);
+        continue;
+      }
+
+      const existingIdx = nextLines.findIndex((l) => l.product.productId === prod.productId);
+      const existingQty = existingIdx >= 0 ? nextLines[existingIdx].quantity : 0;
+      let targetQty = existingQty + heldItem.quantity;
+
+      if (!allowNegative && targetQty > inv.quantityAvailable) {
+        targetQty = inv.quantityAvailable;
+        if (targetQty <= existingQty) {
+          warnings.push(`${prod.name} has insufficient stock (${inv.quantityAvailable} left)`);
+          continue;
+        }
+        warnings.push(`${prod.name} adjusted to ${targetQty} available`);
+      }
+
+      const unitPriceMinor = inv.sellingPriceMinor ?? prod.sellingPriceMinor;
+      const costPriceMinor = inv.costPriceMinor ?? prod.costPriceMinor;
+      const maxLineDisc = Math.round((unitPriceMinor * targetQty * maxDiscountPct) / 100);
+      const mergedDisc =
+        existingIdx >= 0
+          ? Math.min(nextLines[existingIdx].discountMinor + heldItem.discountMinor, maxLineDisc)
+          : Math.min(heldItem.discountMinor, maxLineDisc);
+
+      const lineObj: CartLine = {
+        product: prod,
+        quantity: targetQty,
+        unitPriceMinor,
+        costPriceMinor,
+        discountMinor: mergedDisc,
+        availableStock: inv.quantityAvailable,
+      };
+
+      if (existingIdx >= 0) {
+        nextLines[existingIdx] = lineObj;
+      } else {
+        nextLines.push(lineObj);
+      }
+    }
+
+    setCart(nextLines);
+    if (mode === 'replace') {
+      setOrderDiscountInput(order.orderDiscountInput || '0');
+      setOrderNote(order.orderNote || '');
+      setSelectedCustomerId(order.customerId || '');
+    } else if (!selectedCustomerId && order.customerId) {
+      setSelectedCustomerId(order.customerId);
+    }
+
+    persistHeldOrders(heldOrders.filter((h) => h.holdId !== order.holdId));
+    setShowHeldOrders(false);
+
+    if (warnings.length > 0) {
+      notify('info', 'Order Resumed With Adjustments', warnings.join('; '));
+    } else {
+      notify('success', 'Order Resumed', `Loaded "${order.referenceLabel}" into cart.`);
+    }
+    window.setTimeout(() => barcodeInputRef.current?.focus(), 50);
+  };
+
+  const handleOpenRecentReceipt = async (sale: Sale) => {
+    if (!organization) return;
+    setLoadingReprintId(sale.saleId);
+    try {
+      const items = await fetchSaleItems(sale.saleId, organization.organizationId);
+      setReceiptSale(sale);
+      setReceiptItems(items);
+      setShowRecentReceipts(false);
+    } catch (err) {
+      notify(
+        'error',
+        'Could Not Load Receipt',
+        err instanceof Error ? err.message : 'Failed to fetch receipt line items.'
+      );
+    } finally {
+      setLoadingReprintId(null);
+    }
+  };
 
   const handleCompleteSale = async () => {
     if (!organization || !userProfile || !activeBranchId) return;
@@ -468,6 +751,7 @@ export function PosTerminalPage() {
       const res = await processPosSale({
         organizationId: organization.organizationId,
         branchId: activeBranchId,
+        settingId: systemSettings?.settingId,
         cashierName: userProfile.fullName,
         cashSessionId: activeCashSession?.sessionId,
         customerId: cust?.customerId,
@@ -513,6 +797,7 @@ export function PosTerminalPage() {
       setReceiptItems(res.items);
       setCart([]);
       setOrderDiscountInput('0');
+      setOrderNote('');
       setSelectedCustomerId('');
       setShowPayment(false);
       setIdempotencyKey(makeId('idem'));
@@ -590,15 +875,54 @@ export function PosTerminalPage() {
                   </select>
                 </div>
               )}
-              <span className="text-[11px] text-slate-400 hidden sm:inline">
-                Press <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded text-[10px] font-mono">F2</kbd> to focus · Prefix <span className="font-mono text-slate-600">3*CODE</span> for multi-qty
+              <span className="text-[11px] text-slate-400 hidden xl:inline">
+                <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded text-[10px] font-mono">F2</kbd> scan ·{' '}
+                <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded text-[10px] font-mono">F8</kbd> hold ·{' '}
+                <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded text-[10px] font-mono">F9</kbd> pay
               </span>
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setShowHeldOrders(true)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors whitespace-nowrap ${
+                  heldOrders.length > 0
+                    ? 'bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100'
+                    : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <PauseCircle className="w-3.5 h-3.5 text-amber-600" />
+                Held ({heldOrders.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowRecentReceipts(true)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap"
+              >
+                <Receipt className="w-3.5 h-3.5 text-emerald-600" />
+                Recent Sales
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowShiftDrawer(true)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors whitespace-nowrap ${
+                  activeCashSession
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100'
+                    : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                }`}
+                title="View active cash shift drawer balance"
+              >
+                <Wallet className="w-3.5 h-3.5" />
+                <span className="font-mono tabular-nums">
+                  {activeCashSession
+                    ? formatMoney(activeCashSession.expectedClosingBalanceMinor, sym)
+                    : 'No Shift'}
+                </span>
+              </button>
               <button
                 type="button"
                 onClick={() => setWedgeEnabled((prev) => !prev)}
-                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors ${
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors whitespace-nowrap ${
                   wedgeEnabled
                     ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
                     : 'bg-slate-50 border-slate-200 text-slate-500'
@@ -740,16 +1064,19 @@ export function PosTerminalPage() {
               >
                 <div>
                   <div className="aspect-[4/3] w-full rounded-lg bg-slate-100 overflow-hidden mb-2.5 flex items-center justify-center">
-                    {p.imageUrl ? (
-                      <img
-                        src={p.imageUrl}
-                        alt={p.name}
-                        referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <Package className="w-7 h-7 text-slate-400" />
-                    )}
+                    {(() => {
+                      const safeImg = sanitizeHttpUrl(p.imageUrl);
+                      return safeImg ? (
+                        <img
+                          src={safeImg}
+                          alt={p.name}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <Package className="w-7 h-7 text-slate-400" />
+                      );
+                    })()}
                   </div>
                   <p className="text-sm font-semibold text-slate-900 line-clamp-2 leading-snug">
                     {p.name}
@@ -786,46 +1113,81 @@ export function PosTerminalPage() {
 
       {/* Right: Shopping Cart & Totals */}
       <div className="xl:col-span-4 bg-white border border-slate-200 rounded-xl flex flex-col sticky top-20">
-        <div className="px-4 py-3.5 border-b border-slate-200 flex items-center justify-between">
+        <div className="px-4 py-3.5 border-b border-slate-200 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <ShoppingCart className="w-4 h-4 text-emerald-600" />
-            <h2 className="text-sm font-semibold text-slate-900">Current Sale Cart</h2>
+            <h2 className="text-sm font-semibold text-slate-900">
+              Current Sale Cart
+              {cart.length > 0 && (
+                <span className="ml-1.5 text-xs font-mono text-slate-500">
+                  ({cart.reduce((s, c) => s + c.quantity, 0)})
+                </span>
+              )}
+            </h2>
           </div>
           {cart.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setCart([])}
-              className="text-xs text-rose-600 hover:underline"
-            >
-              Clear
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowHoldModal(true)}
+                className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 hover:text-amber-800 whitespace-nowrap"
+                title="Park this order to resume later (F8)"
+              >
+                <PauseCircle className="w-3.5 h-3.5" />
+                Hold
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCart([]);
+                  setOrderDiscountInput('0');
+                  setOrderNote('');
+                }}
+                className="text-xs text-rose-600 hover:underline whitespace-nowrap"
+              >
+                Clear
+              </button>
+            </div>
           )}
         </div>
 
         {/* Customer Selection */}
-        <div className="px-4 py-3 border-b border-slate-100 flex items-center gap-2">
-          <select
-            aria-label="Select Customer"
-            value={selectedCustomerId}
-            onChange={(e) => setSelectedCustomerId(e.target.value)}
-            className="flex-1 px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-emerald-600"
-          >
-            <option value="">Walk-in Customer (Anonymous)</option>
-            {customers.map((c) => (
-              <option key={c.customerId} value={c.customerId}>
-                {c.fullName} {c.phone ? `(${c.phone})` : ''}
-              </option>
-            ))}
-          </select>
-          {hasPermission('customers.create') && (
-            <button
-              type="button"
-              onClick={() => setShowNewCustomer(true)}
-              className="p-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
-              title="Register New Customer"
+        <div className="px-4 py-3 border-b border-slate-100 space-y-2">
+          <div className="flex items-center gap-2">
+            <select
+              aria-label="Select Customer"
+              value={selectedCustomerId}
+              onChange={(e) => setSelectedCustomerId(e.target.value)}
+              className="flex-1 px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-emerald-600"
             >
-              <UserPlus className="w-3.5 h-3.5" />
-            </button>
+              <option value="">Walk-in Customer (Anonymous)</option>
+              {customers.map((c) => (
+                <option key={c.customerId} value={c.customerId}>
+                  {c.fullName} {c.phone ? `(${c.phone})` : ''}
+                </option>
+              ))}
+            </select>
+            {hasPermission('customers.create') && (
+              <button
+                type="button"
+                onClick={() => setShowNewCustomer(true)}
+                className="p-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
+                title="Register New Customer"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+          {selectedCustomer && (
+            <div className="flex items-center justify-between text-[11px] px-2.5 py-1.5 rounded-lg bg-slate-50 border border-slate-200 text-slate-600">
+              <span>
+                {selectedCustomer.phone || 'No phone'} ·{' '}
+                <span className="font-mono tabular-nums">{selectedCustomer.transactionCount}</span> visits
+              </span>
+              <span className="font-mono tabular-nums font-medium text-emerald-700">
+                Lifetime: {formatMoney(selectedCustomer.totalPurchasesMinor, sym)}
+              </span>
+            </div>
           )}
         </div>
 
@@ -840,7 +1202,8 @@ export function PosTerminalPage() {
                 discountMinor: line.discountMinor,
                 taxCategory: line.product.taxCategory,
               },
-              defaultTaxRateBps
+              defaultTaxRateBps,
+              taxIncludedInPrice
             );
             const isHighlighted = highlightedProductId === line.product.productId;
             return (
@@ -873,21 +1236,28 @@ export function PosTerminalPage() {
                 </div>
 
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center border border-slate-200 rounded-lg">
+                  <div className="flex items-center border border-slate-200 rounded-lg overflow-hidden">
                     <button
                       type="button"
                       onClick={() => updateCartQty(line.product.productId, -1)}
                       className="p-1.5 text-slate-600 hover:bg-slate-50"
+                      aria-label={`Decrease quantity for ${line.product.name}`}
                     >
                       <Minus className="w-3 h-3" />
                     </button>
-                    <span className="px-2.5 text-xs font-mono tabular-nums font-semibold">
-                      {line.quantity}
-                    </span>
+                    <input
+                      type="number"
+                      min="1"
+                      aria-label={`Quantity for ${line.product.name}`}
+                      value={line.quantity}
+                      onChange={(e) => setCartLineQty(line.product.productId, e.target.value)}
+                      className="w-11 text-center text-xs font-mono tabular-nums font-semibold py-1 border-x border-slate-200 focus:outline-none focus:bg-emerald-50"
+                    />
                     <button
                       type="button"
                       onClick={() => updateCartQty(line.product.productId, 1)}
                       className="p-1.5 text-slate-600 hover:bg-slate-50"
+                      aria-label={`Increase quantity for ${line.product.name}`}
                     >
                       <Plus className="w-3 h-3" />
                     </button>
@@ -927,17 +1297,54 @@ export function PosTerminalPage() {
 
         {/* Totals & Checkout */}
         <div className="p-4 border-t border-slate-200 bg-slate-50/70 rounded-b-xl space-y-2.5">
+          {cart.length > 0 && (
+            <input
+              type="text"
+              value={orderNote}
+              onChange={(e) => setOrderNote(e.target.value)}
+              placeholder="Optional order note (e.g. packaging / hold ref)..."
+              maxLength={120}
+              className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:border-emerald-600"
+            />
+          )}
+
           {canApplyDiscounts && (
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-slate-600">Order Discount ({sym})</span>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                value={orderDiscountInput}
-                onChange={(e) => setOrderDiscountInput(e.target.value)}
-                className="w-24 px-2 py-1 text-right font-mono bg-white border border-slate-200 rounded"
-              />
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs gap-2">
+                <span className="text-slate-600 flex items-center gap-1">
+                  <Percent className="w-3 h-3 text-slate-400" />
+                  Order Discount ({sym})
+                </span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={orderDiscountInput}
+                  onChange={(e) => setOrderDiscountInput(e.target.value)}
+                  className="w-24 px-2 py-1 text-right font-mono bg-white border border-slate-200 rounded"
+                />
+              </div>
+              {cart.length > 0 && maxDiscountPct > 0 && (
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="text-[10px] text-slate-400">
+                    Max {maxDiscountPct}% ({formatMoney(maxOrderDiscountMinor, sym)})
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {[0, 5, 10]
+                      .filter((pct) => pct <= maxDiscountPct)
+                      .map((pct) => (
+                        <button
+                          key={pct}
+                          type="button"
+                          onClick={() => applyOrderDiscountPct(pct)}
+                          className="px-2 py-0.5 text-[10px] font-mono font-medium rounded border border-slate-200 bg-white hover:bg-slate-100 text-slate-700"
+                        >
+                          {pct === 0 ? 'Clear' : `${pct}%`}
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
           <div className="flex justify-between text-xs text-slate-600">
@@ -949,8 +1356,18 @@ export function PosTerminalPage() {
             <span className="font-mono tabular-nums">-{formatMoney(totals.discountMinor, sym)}</span>
           </div>
           <div className="flex justify-between text-xs text-slate-600">
-            <span>Tax ({organization?.taxLabel || 'VAT'})</span>
-            <span className="font-mono tabular-nums">{formatMoney(totals.taxMinor, sym)}</span>
+            <span>
+              Tax ({organization?.taxLabel || 'VAT'}
+              {taxIncludedInPrice ? ' · Incl. in price' : ''})
+            </span>
+            <span className="font-mono tabular-nums">
+              {formatTaxDisplayValue({
+                taxMinor: totals.taxMinor,
+                currencySymbol: sym,
+                defaultTaxRateBps,
+                taxDisplayMode: systemSettings?.taxDisplayMode,
+              })}
+            </span>
           </div>
           <div className="flex justify-between text-base font-bold text-slate-900 pt-2 border-t border-slate-200">
             <span>Grand Total</span>
@@ -965,15 +1382,28 @@ export function PosTerminalPage() {
             </p>
           )}
 
-          <button
-            type="button"
-            disabled={cart.length === 0 || (entitlements ? !entitlements.isOperational : false)}
-            onClick={openPaymentModal}
-            className="w-full mt-2 py-3 px-4 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-          >
-            <CreditCard className="w-4 h-4" />
-            Proceed to Payment
-          </button>
+          <div className="flex items-center gap-2 pt-1">
+            {cart.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowHoldModal(true)}
+                className="py-3 px-3.5 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100 text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap"
+                title="Park current order (F8)"
+              >
+                <PauseCircle className="w-4 h-4 text-amber-600" />
+                Hold
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={cart.length === 0 || (entitlements ? !entitlements.isOperational : false)}
+              onClick={openPaymentModal}
+              className="flex-1 py-3 px-4 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50 whitespace-nowrap"
+            >
+              <CreditCard className="w-4 h-4" />
+              Proceed to Payment
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1001,6 +1431,26 @@ export function PosTerminalPage() {
               </span>
             </div>
 
+            {quickCashSuggestionsMinor.length > 0 && (
+              <div className="space-y-1.5">
+                <span className="block text-[11px] font-medium text-slate-500">
+                  Quick Cash Tender (fills active payment row)
+                </span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {quickCashSuggestionsMinor.map((amtMinor, idx) => (
+                    <button
+                      key={amtMinor}
+                      type="button"
+                      onClick={() => applyQuickTenderAmount(amtMinor)}
+                      className="px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-emerald-50 hover:border-emerald-300 text-xs font-mono tabular-nums font-medium text-slate-800 whitespace-nowrap"
+                    >
+                      {idx === 0 ? `Exact (${formatMoney(amtMinor, sym)})` : formatMoney(amtMinor, sym)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="space-y-3">
               {splitPayments.map((sp, idx) => (
                 <div key={idx} className="grid grid-cols-12 gap-2 items-center">
@@ -1008,6 +1458,7 @@ export function PosTerminalPage() {
                     value={sp.method}
                     onChange={(e) => {
                       const val = e.target.value as SinglePaymentMethod;
+                      setActiveSplitIdx(idx);
                       setSplitPayments((prev) =>
                         prev.map((row, i) => (i === idx ? { ...row, method: val } : row))
                       );
@@ -1025,6 +1476,7 @@ export function PosTerminalPage() {
                     step="0.01"
                     min="0"
                     value={sp.amountStr}
+                    onFocus={() => setActiveSplitIdx(idx)}
                     onChange={(e) =>
                       setSplitPayments((prev) =>
                         prev.map((row, i) =>
@@ -1038,6 +1490,7 @@ export function PosTerminalPage() {
                   <input
                     type="text"
                     value={sp.reference}
+                    onFocus={() => setActiveSplitIdx(idx)}
                     onChange={(e) =>
                       setSplitPayments((prev) =>
                         prev.map((row, i) =>
@@ -1051,9 +1504,10 @@ export function PosTerminalPage() {
                   {splitPayments.length > 1 && (
                     <button
                       type="button"
-                      onClick={() =>
-                        setSplitPayments((prev) => prev.filter((_, i) => i !== idx))
-                      }
+                      onClick={() => {
+                        setSplitPayments((prev) => prev.filter((_, i) => i !== idx));
+                        setActiveSplitIdx(0);
+                      }}
                       className="col-span-1 text-slate-400 hover:text-rose-600 flex justify-center"
                     >
                       <X className="w-4 h-4" />
@@ -1062,18 +1516,44 @@ export function PosTerminalPage() {
                 </div>
               ))}
 
-              <button
-                type="button"
-                onClick={() =>
-                  setSplitPayments((prev) => [
-                    ...prev,
-                    { method: 'mobile_money', amountStr: '0', reference: '' },
-                  ])
-                }
-                className="text-xs font-medium text-emerald-700 hover:underline"
-              >
-                + Add Split Payment Method
-              </button>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextIdx = splitPayments.length;
+                    setSplitPayments((prev) => [
+                      ...prev,
+                      {
+                        method: supportedMethods.find((m) => m !== 'cash') || 'mobile_money',
+                        amountStr:
+                          remainingDueMinor > 0
+                            ? fromMinorUnits(remainingDueMinor).toFixed(2)
+                            : '0',
+                        reference: '',
+                      },
+                    ]);
+                    setActiveSplitIdx(nextIdx);
+                  }}
+                  className="text-xs font-medium text-emerald-700 hover:underline"
+                >
+                  + Add Split Payment Method
+                </button>
+                {remainingDueMinor > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const currentRowMinor = Math.max(
+                        0,
+                        toMinorUnits(splitPayments[activeSplitIdx]?.amountStr || '0')
+                      );
+                      applyQuickTenderAmount(currentRowMinor + remainingDueMinor);
+                    }}
+                    className="text-[11px] font-medium text-amber-700 hover:underline"
+                  >
+                    Fill remaining ({formatMoney(remainingDueMinor, sym)})
+                  </button>
+                )}
+              </div>
             </div>
 
             {splitPayments.some((p) => p.method !== 'cash') && (
@@ -1083,11 +1563,21 @@ export function PosTerminalPage() {
               </p>
             )}
 
-            <div className="flex items-center justify-between text-xs pt-2 border-t border-slate-200">
-              <span className="text-slate-600">Change Due to Customer:</span>
-              <span className="font-mono font-bold text-slate-900 tabular-nums">
-                {formatMoney(Math.max(0, totalTenderedMinor - totals.totalMinor), sym)}
-              </span>
+            <div className="space-y-1.5 text-xs pt-2 border-t border-slate-200">
+              {remainingDueMinor > 0 && (
+                <div className="flex items-center justify-between text-rose-700 font-medium">
+                  <span>Remaining Balance Due:</span>
+                  <span className="font-mono font-bold tabular-nums">
+                    {formatMoney(remainingDueMinor, sym)}
+                  </span>
+                </div>
+              )}
+              <div className="flex items-center justify-between">
+                <span className="text-slate-600">Change Due to Customer:</span>
+                <span className="font-mono font-bold text-slate-900 tabular-nums">
+                  {formatMoney(Math.max(0, totalTenderedMinor - totals.totalMinor), sym)}
+                </span>
+              </div>
             </div>
 
             <div className="flex justify-end gap-3 pt-2">
@@ -1157,6 +1647,67 @@ export function PosTerminalPage() {
           </form>
         </div>
       )}
+
+      <HoldOrderModal
+        open={showHoldModal}
+        onClose={() => {
+          setShowHoldModal(false);
+          window.setTimeout(() => barcodeInputRef.current?.focus(), 50);
+        }}
+        onConfirm={handleParkOrder}
+        itemCount={cart.reduce((s, c) => s + c.quantity, 0)}
+        totalMinor={totals.totalMinor}
+        currencySymbol={sym}
+        defaultLabel={
+          selectedCustomer
+            ? selectedCustomer.fullName
+            : `HOLD-${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`
+        }
+        defaultNote={orderNote}
+      />
+
+      <HeldOrdersModal
+        open={showHeldOrders}
+        onClose={() => {
+          setShowHeldOrders(false);
+          window.setTimeout(() => barcodeInputRef.current?.focus(), 50);
+        }}
+        heldOrders={heldOrders}
+        hasActiveCart={cart.length > 0}
+        currencySymbol={sym}
+        onResume={handleResumeHeldOrder}
+        onDiscard={(holdId) => {
+          persistHeldOrders(heldOrders.filter((h) => h.holdId !== holdId));
+          notify('info', 'Held Order Discarded', 'Removed parked order from queue.');
+        }}
+        onClearAll={() => {
+          persistHeldOrders([]);
+          notify('info', 'Held Orders Cleared', 'All parked orders at this branch were removed.');
+        }}
+      />
+
+      <RecentReceiptsModal
+        open={showRecentReceipts}
+        onClose={() => {
+          setShowRecentReceipts(false);
+          window.setTimeout(() => barcodeInputRef.current?.focus(), 50);
+        }}
+        sales={branchSales}
+        currencySymbol={sym}
+        loadingSaleId={loadingReprintId}
+        onSelectSale={(sale) => void handleOpenRecentReceipt(sale)}
+      />
+
+      <ShiftDrawerModal
+        open={showShiftDrawer}
+        onClose={() => {
+          setShowShiftDrawer(false);
+          window.setTimeout(() => barcodeInputRef.current?.focus(), 50);
+        }}
+        session={activeCashSession}
+        branchName={activeBranch?.branchName || 'Current Branch'}
+        currencySymbol={sym}
+      />
 
       <BarcodeScannerModal
         open={showCameraScanner}

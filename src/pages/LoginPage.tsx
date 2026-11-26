@@ -8,6 +8,7 @@ export function LoginPage() {
   const {
     firebaseUser,
     userProfile,
+    userRole,
     pendingInvitation,
     acceptPendingInvitation,
     signInWithGoogle,
@@ -169,8 +170,11 @@ export function LoginPage() {
           </div>
         )}
 
-        {/* Authenticated User Without Profile: Claim Invite OR Register New Retail Business */}
-        {firebaseUser && !userProfile && !pendingInvitation && (
+        {/* Authenticated User Without Active Workspace Role: Register New Retail Business */}
+        {firebaseUser &&
+          !pendingInvitation &&
+          userProfile?.accountStatus !== 'suspended' &&
+          (!userProfile || !userRole) && (
           <div className="space-y-4">
             <div className="p-4 rounded-lg bg-emerald-50 border border-emerald-200 flex items-start gap-3">
               <Store className="w-5 h-5 text-emerald-700 shrink-0 mt-0.5" />

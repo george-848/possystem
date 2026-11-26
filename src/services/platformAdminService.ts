@@ -8,14 +8,18 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
+  where,
   writeBatch,
 } from 'firebase/firestore';
 import {
   DEFAULT_SAAS_PLANS,
   getPlanById,
+  mergePlansWithDefaults,
   resolveSubscriptionLifecycle,
 } from '../lib/entitlements';
-import { auth, db } from '../lib/firebase';
+import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
+import { DEFAULT_ROLE_PRESETS } from '../lib/permissions';
+import { DEFAULT_RECEIPT_VISIBLE_FIELDS } from '../lib/receiptConfig';
 import type {
   BillingCycle,
   FeatureKey,
@@ -33,6 +37,7 @@ import type {
 } from '../types/pos';
 import {
   apiRequest,
+  cleanOptional,
   isBackendFallbackError,
   makeId,
 } from './auditService';
@@ -107,7 +112,9 @@ export async function fetchPlatformOverview(): Promise<PlatformOverviewPayload> 
       ticketsSnap,
       logsSnap,
     ] = await Promise.all([
-      getDocs(collection(db, 'plans')).catch(() => null),
+      getDocs(
+        query(collection(db, 'plans'), where('status', 'in', ['active', 'archived']))
+      ).catch(() => null),
       getDocs(collection(db, 'tenants')).catch(() => null),
       getDocs(collection(db, 'organizations')).catch(() => null),
       getDocs(collection(db, 'subscriptions')).catch(() => null),
@@ -118,12 +125,10 @@ export async function fetchPlatformOverview(): Promise<PlatformOverviewPayload> 
       getDocs(query(collection(db, 'platformAuditLogs'), limit(100))).catch(() => null),
     ]);
 
-    const plans =
-      plansSnap && !plansSnap.empty
-        ? plansSnap.docs
-            .map((d) => d.data() as SubscriptionPlan)
-            .sort((a, b) => a.sortOrder - b.sortOrder)
-        : DEFAULT_SAAS_PLANS;
+    const firestorePlans = plansSnap
+      ? plansSnap.docs.map((d) => d.data() as SubscriptionPlan)
+      : [];
+    const plans = mergePlansWithDefaults(firestorePlans);
 
     const rawTenants = tenantsSnap ? tenantsSnap.docs.map((d) => d.data() as Tenant) : [];
     const tenantIds = new Set(rawTenants.map((t) => t.tenantId));
@@ -245,10 +250,257 @@ export async function adminCreateTenant(params: {
   status: 'trial' | 'active';
   deploymentMode: 'shared' | 'dedicated';
 }): Promise<{ tenantId: string }> {
-  return apiRequest('/api/platform/tenants', {
-    method: 'POST',
-    body: JSON.stringify(params),
-  });
+  try {
+    return await apiRequest<{ tenantId: string }>('/api/platform/tenants', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  } catch (err) {
+    if (!isBackendFallbackError(err)) {
+      throw err;
+    }
+  }
+
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    throw new Error('Platform admin authentication required.');
+  }
+
+  const safeBusinessName = params.businessName.trim().slice(0, 160);
+  const normalizedOwnerEmail = params.ownerEmail.trim().toLowerCase().slice(0, 160);
+  if (safeBusinessName.length < 2) {
+    throw new Error('Business name must be at least 2 characters.');
+  }
+  if (normalizedOwnerEmail.length < 3 || !normalizedOwnerEmail.includes('@')) {
+    throw new Error('Valid owner email is required.');
+  }
+
+  const organizationId = makeId('org');
+  const branchId = makeId('br');
+  const terminalId = makeId('term');
+  const settingId = makeId('set');
+  const subscriptionId = makeId('sub');
+  const auditLogId = makeId('plog');
+  const superAdminRoleId = `${organizationId}_role_super_admin`;
+
+  const isSelfOwner = Boolean(
+    currentUser.email && currentUser.email.toLowerCase() === normalizedOwnerEmail
+  );
+  const ownerUid = isSelfOwner ? currentUser.uid : makeId('pending_owner');
+  const rawOwnerName =
+    params.ownerName?.trim() ||
+    normalizedOwnerEmail.split('@')[0]?.trim() ||
+    'Business Owner';
+  const safeOwnerName =
+    rawOwnerName.length >= 2 ? rawOwnerName.slice(0, 160) : 'Business Owner';
+
+  try {
+    const planSnap = await getDoc(doc(db, 'plans', params.planId)).catch(() => null);
+    const selectedPlan =
+      planSnap && planSnap.exists()
+        ? (planSnap.data() as SubscriptionPlan)
+        : getPlanById(params.planId, DEFAULT_SAAS_PLANS);
+
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const periodDays =
+      params.status === 'trial'
+        ? selectedPlan.trialDays > 0
+          ? selectedPlan.trialDays
+          : 14
+        : params.billingCycle === 'annual'
+          ? 365
+          : 30;
+    const periodEndIso = new Date(nowMs + periodDays * 86_400_000).toISOString();
+
+    // 1. Create Organization root first so branches rule exists(orgPath(...)) succeeds in batch
+    await setDoc(
+      doc(db, 'organizations', organizationId),
+      cleanOptional({
+        organizationId,
+        businessName: safeBusinessName,
+        email: normalizedOwnerEmail,
+        phone: params.contactPhone?.trim().slice(0, 40),
+        country: 'Ghana',
+        currency: 'GHS',
+        currencySymbol: 'GH₵',
+        timezone: 'Africa/Accra',
+        defaultTaxRateBps: 1500,
+        taxLabel: 'VAT',
+        allowNegativeInventory: false,
+        status: 'active',
+        ownerUid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    // 2. Branch and POS Terminal
+    await setDoc(doc(db, 'branches', branchId), {
+      branchId,
+      organizationId,
+      branchCode: 'BR-001',
+      branchName: `${safeBusinessName} — Head Office`.slice(0, 160),
+      country: 'Ghana',
+      email: normalizedOwnerEmail,
+      managerName: safeOwnerName.slice(0, 120),
+      status: 'active',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    await setDoc(doc(db, 'terminals', terminalId), {
+      terminalId,
+      organizationId,
+      branchId,
+      terminalCode: 'POS-01',
+      name: 'Front Counter Register 1',
+      status: 'active',
+      createdBy: currentUser.uid,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    // 3. Roles (2 docs per batch to stay well under per-batch lookup limits for non-bootstrap admins)
+    for (let i = 0; i < DEFAULT_ROLE_PRESETS.length; i += 2) {
+      const roleBatch = writeBatch(db);
+      for (const preset of DEFAULT_ROLE_PRESETS.slice(i, i + 2)) {
+        const scopedRoleId = `${organizationId}_${preset.roleId}`;
+        roleBatch.set(doc(db, 'roles', scopedRoleId), {
+          roleId: scopedRoleId,
+          organizationId,
+          name: preset.name,
+          description: preset.description,
+          scope: preset.scope,
+          permissions: preset.permissions,
+          isSystem: true,
+          isActive: true,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+      await roleBatch.commit();
+    }
+
+    // 4. Settings, Subscription, Membership/Invitation, Usage, Audit Log, and Tenant
+    const configBatch = writeBatch(db);
+    configBatch.set(doc(db, 'systemSettings', settingId), {
+      settingId,
+      organizationId,
+      receiptHeader: `${safeBusinessName} — Official Retail Receipt`.slice(0, 300),
+      receiptFooter: 'Thank you for your patronage.',
+      receiptVisibleFields: DEFAULT_RECEIPT_VISIBLE_FIELDS,
+      supportedPaymentMethods: ['cash', 'mobile_money', 'card', 'bank_transfer'],
+      maxCashierDiscountPct: 10,
+      expenseApprovalLimitMinor: 50000,
+      refundWindowDays: 7,
+      lowStockNotificationsEnabled: true,
+      updatedAt: serverTimestamp(),
+    });
+    configBatch.set(doc(db, 'subscriptions', subscriptionId), {
+      subscriptionId,
+      tenantId: organizationId,
+      planId: selectedPlan.planId,
+      billingCycle: params.billingCycle,
+      status: params.status,
+      ...(params.status === 'trial' ? { trialEndsAt: periodEndIso } : {}),
+      currentPeriodStart: nowIso,
+      currentPeriodEnd: periodEndIso,
+      paymentProvider: params.status === 'trial' ? 'trial' : 'manual',
+      assignedBy: currentUser.uid,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    await configBatch.commit();
+
+    const batch = writeBatch(db);
+    batch.set(
+      doc(db, 'tenants', organizationId),
+      cleanOptional({
+        tenantId: organizationId,
+        organizationId,
+        businessName: safeBusinessName,
+        ownerUid,
+        ownerEmail: normalizedOwnerEmail,
+        contactPhone: params.contactPhone?.trim().slice(0, 40),
+        country: 'Ghana',
+        currency: 'GHS',
+        currencySymbol: 'GH₵',
+        status: 'active',
+        currentPlanId: selectedPlan.planId,
+        subscriptionId,
+        deploymentMode: params.deploymentMode,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    if (isSelfOwner) {
+      const membershipId = `${organizationId}_${currentUser.uid}`;
+      batch.set(doc(db, 'tenantMemberships', membershipId), {
+        membershipId,
+        tenantId: organizationId,
+        uid: currentUser.uid,
+        email: normalizedOwnerEmail,
+        fullName: safeOwnerName,
+        roleId: superAdminRoleId,
+        branchIds: [branchId],
+        defaultBranchId: branchId,
+        isOwner: true,
+        status: 'active',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      const invitationId = makeId('inv');
+      batch.set(doc(db, 'invitations', invitationId), {
+        invitationId,
+        organizationId,
+        email: normalizedOwnerEmail,
+        fullName: safeOwnerName,
+        roleId: superAdminRoleId,
+        branchIds: [branchId],
+        defaultBranchId: branchId,
+        status: 'pending',
+        invitedBy: currentUser.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    batch.set(doc(db, 'usageTracking', organizationId), {
+      tenantId: organizationId,
+      branchCount: 1,
+      terminalCount: 1,
+      staffCount: isSelfOwner ? 1 : 0,
+      productCount: 0,
+      updatedAt: serverTimestamp(),
+    });
+
+    batch.set(
+      doc(db, 'platformAuditLogs', auditLogId),
+      cleanOptional({
+        logId: auditLogId,
+        actorUid: currentUser.uid,
+        actorEmail: currentUser.email || undefined,
+        targetTenantId: organizationId,
+        action: 'platform.tenant_created',
+        resourceType: 'tenant',
+        resourceId: organizationId,
+        details: `Platform admin registered tenant "${safeBusinessName}" (${normalizedOwnerEmail}) on ${selectedPlan.name} (${params.status})`.slice(
+          0,
+          1000
+        ),
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    await batch.commit();
+
+    return { tenantId: organizationId };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `tenants/${organizationId}`);
+  }
 }
 
 export async function adminToggleTenantStatus(params: {
@@ -374,6 +626,15 @@ export async function adminAssignTenantSubscription(params: {
 }
 
 export async function adminSavePlanConfig(plan: SubscriptionPlan): Promise<void> {
+  const safeMonthlyMinor = Math.max(0, Math.round(Number(plan.monthlyPriceMinor) || 0));
+  const safeAnnualMinor = Math.max(0, Math.round(Number(plan.annualPriceMinor) || 0));
+  const safeTrialDays = Math.max(0, Math.min(90, Math.round(Number(plan.trialDays) || 0)));
+  const safeGraceDays = Math.max(
+    0,
+    Math.min(60, Math.round(Number(plan.gracePeriodDays) || 0))
+  );
+  const safeSortOrder = Math.max(0, Math.round(Number(plan.sortOrder) || 1));
+
   const cleanLimits: PlanLimits = {
     maxBranches: plan.limits.maxBranches ?? null,
     maxTerminals: plan.limits.maxTerminals ?? null,
@@ -391,10 +652,10 @@ export async function adminSavePlanConfig(plan: SubscriptionPlan): Promise<void>
         name: plan.name,
         tagline: plan.tagline,
         description: plan.description,
-        monthlyPriceMinor: plan.monthlyPriceMinor,
-        annualPriceMinor: plan.annualPriceMinor,
-        trialDays: plan.trialDays,
-        gracePeriodDays: plan.gracePeriodDays,
+        monthlyPriceMinor: safeMonthlyMinor,
+        annualPriceMinor: safeAnnualMinor,
+        trialDays: safeTrialDays,
+        gracePeriodDays: safeGraceDays,
         isCustomPricing: Boolean(plan.isCustomPricing),
         status: plan.status,
         limits: cleanLimits,
@@ -403,29 +664,34 @@ export async function adminSavePlanConfig(plan: SubscriptionPlan): Promise<void>
     });
   } catch (err) {
     if (!isBackendFallbackError(err)) throw err;
-    await setDoc(
-      doc(db, 'plans', plan.planId),
-      {
-        planId: plan.planId,
-        name: plan.name,
-        tagline: plan.tagline,
-        description: plan.description,
-        currency: plan.currency || 'GHS',
-        monthlyPriceMinor: plan.monthlyPriceMinor,
-        annualPriceMinor: plan.annualPriceMinor,
-        trialDays: plan.trialDays,
-        gracePeriodDays: plan.gracePeriodDays,
-        limits: cleanLimits,
-        features: plan.features,
-        ...(plan.isCustomPricing !== undefined
-          ? { isCustomPricing: Boolean(plan.isCustomPricing) }
-          : {}),
-        sortOrder: plan.sortOrder ?? 1,
-        status: plan.status || 'active',
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
+    const planPath = `plans/${plan.planId}`;
+    try {
+      await setDoc(
+        doc(db, 'plans', plan.planId),
+        {
+          planId: plan.planId,
+          name: plan.name.trim().slice(0, 80),
+          tagline: plan.tagline.trim().slice(0, 160),
+          description: plan.description.trim().slice(0, 500),
+          currency: plan.currency || 'GHS',
+          monthlyPriceMinor: safeMonthlyMinor,
+          annualPriceMinor: safeAnnualMinor,
+          trialDays: safeTrialDays,
+          gracePeriodDays: safeGraceDays,
+          limits: cleanLimits,
+          features: plan.features,
+          ...(plan.isCustomPricing !== undefined
+            ? { isCustomPricing: Boolean(plan.isCustomPricing) }
+            : {}),
+          sortOrder: safeSortOrder,
+          status: plan.status || 'active',
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch (fsErr) {
+      handleFirestoreError(fsErr, OperationType.WRITE, planPath);
+    }
   }
 }
 

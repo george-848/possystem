@@ -453,6 +453,8 @@ export type ReceiptFieldKey =
   | 'returnPolicy'
   | 'receiptFooter';
 
+export type TaxDisplayMode = 'amount' | 'percentage';
+
 export interface SystemSettings {
   settingId: string;
   organizationId: string;
@@ -465,6 +467,8 @@ export interface SystemSettings {
   expenseApprovalLimitMinor: number;
   refundWindowDays: number;
   lowStockNotificationsEnabled: boolean;
+  taxIncludedInPrice?: boolean;
+  taxDisplayMode?: TaxDisplayMode;
   updatedAt?: unknown;
 }
 

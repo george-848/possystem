@@ -1,6 +1,8 @@
-import * as XLSX from 'xlsx';
+import readXlsxFile from 'read-excel-file/browser';
+import writeXlsxFile, { type Sheet as WriteSheet, type SheetData } from 'write-excel-file/browser';
 import { downloadCsvFile } from './csv';
 import { toMinorUnits } from './money';
+import { sanitizeHttpUrl } from './url';
 import type { Category, Product, ProductStatus, TaxCategory } from '../types/pos';
 
 export type ImportTargetField =
@@ -213,7 +215,18 @@ export function parseCsvText(rawText: string): string[][] {
   return rows;
 }
 
-export function parseSpreadsheetBuffer(buffer: ArrayBuffer, fileName: string): ParsedSpreadsheetData {
+function formatSpreadsheetCell(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10);
+  }
+  return String(value).trim();
+}
+
+export async function parseSpreadsheetBuffer(
+  buffer: ArrayBuffer,
+  fileName: string
+): Promise<ParsedSpreadsheetData> {
   const lower = fileName.toLowerCase();
   if (lower.endsWith('.csv')) {
     const decoded = new TextDecoder('utf-8').decode(new Uint8Array(buffer));
@@ -225,26 +238,23 @@ export function parseSpreadsheetBuffer(buffer: ArrayBuffer, fileName: string): P
     };
   }
 
-  const workbook = XLSX.read(buffer, { type: 'array', cellDates: false });
+  const parsedSheets = await readXlsxFile(buffer);
   const sheets: Record<string, string[][]> = {};
-  for (const sheetName of workbook.SheetNames) {
-    const sheet = workbook.Sheets[sheetName];
-    if (!sheet) continue;
-    const rawRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
-      header: 1,
-      defval: '',
-      raw: false,
-      blankrows: false,
-    });
-    const normalizedRows = rawRows
-      .map((r) => (Array.isArray(r) ? r.map((v) => String(v ?? '').trim()) : []))
-      .filter((r) => r.some((cell) => cell !== ''));
-    sheets[sheetName] = normalizedRows;
+  const sheetNames: string[] = [];
+
+  for (const entry of parsedSheets) {
+    const normalizedRows = entry.data
+      .map((row) => (Array.isArray(row) ? row.map(formatSpreadsheetCell) : []))
+      .filter((row) => row.some((cell) => cell !== ''));
+    if (normalizedRows.length > 0) {
+      sheets[entry.sheet] = normalizedRows;
+      sheetNames.push(entry.sheet);
+    }
   }
 
   return {
     fileName,
-    sheetNames: workbook.SheetNames.filter((name) => Boolean(sheets[name])),
+    sheetNames,
     sheets,
   };
 }
@@ -398,7 +408,19 @@ export function evaluateImportRows(params: {
     if (brand.length > 100) errors.push('Brand exceeds 100 characters.');
     if (unit.length > 40) errors.push('Unit exceeds 40 characters.');
     if (description.length > 600) errors.push('Description exceeds 600 characters.');
-    if (imageUrl && imageUrl.length > 1000) errors.push('Image URL exceeds 1000 characters.');
+    let safeImageUrl: string | undefined;
+    if (imageUrl) {
+      if (imageUrl.length > 1000) {
+        errors.push('Image URL exceeds 1000 characters.');
+      } else {
+        const sanitized = sanitizeHttpUrl(imageUrl);
+        if (!sanitized) {
+          errors.push('Image URL must be a valid http:// or https:// URL.');
+        } else {
+          safeImageUrl = sanitized;
+        }
+      }
+    }
 
     let costPrice = 0;
     if (costStr) {
@@ -511,7 +533,7 @@ export function evaluateImportRows(params: {
               minimumStock,
               initialStock,
               description: description || undefined,
-              imageUrl: imageUrl || undefined,
+              imageUrl: safeImageUrl,
               status: parsedStatus.value,
             },
       action,
@@ -580,43 +602,56 @@ export function downloadProductImportCsvTemplate(): void {
   downloadCsvFile('product_import_template', TEMPLATE_HEADERS, TEMPLATE_SAMPLE_ROWS);
 }
 
-export function downloadProductImportXlsxTemplate(): void {
-  const wb = XLSX.utils.book_new();
-  const productSheet = XLSX.utils.aoa_to_sheet([TEMPLATE_HEADERS, ...TEMPLATE_SAMPLE_ROWS]);
-  productSheet['!cols'] = [
-    { wch: 30 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 14 },
-    { wch: 8 },
-    { wch: 12 },
-    { wch: 13 },
-    { wch: 15 },
-    { wch: 14 },
-    { wch: 14 },
-    { wch: 13 },
-    { wch: 36 },
-    { wch: 10 },
+function toExcelStringData(rows: string[][]): SheetData {
+  return rows.map((row) =>
+    row.map((val) => ({
+      type: String,
+      value: val,
+    }))
+  );
+}
+
+export async function downloadProductImportXlsxTemplate(): Promise<void> {
+  const sheets: WriteSheet<File>[] = [
+    {
+      sheet: 'Products',
+      columns: [
+        { width: 30 },
+        { width: 16 },
+        { width: 16 },
+        { width: 16 },
+        { width: 14 },
+        { width: 8 },
+        { width: 12 },
+        { width: 13 },
+        { width: 15 },
+        { width: 14 },
+        { width: 14 },
+        { width: 13 },
+        { width: 36 },
+        { width: 10 },
+      ],
+      data: toExcelStringData([TEMPLATE_HEADERS, ...TEMPLATE_SAMPLE_ROWS]),
+    },
+    {
+      sheet: 'Instructions',
+      columns: [{ width: 18 }, { width: 10 }, { width: 68 }],
+      data: toExcelStringData([
+        ['Field', 'Required', 'Accepted Values & Notes'],
+        ['Product Name', 'Yes', '1 to 180 characters'],
+        ['SKU', 'Yes', 'Unique code, auto-uppercased, max 64 characters'],
+        ['Selling Price', 'Yes', 'Non-negative decimal number in organization currency'],
+        ['Cost Price', 'No', 'Non-negative decimal number (defaults to 0.00)'],
+        ['Wholesale Price', 'No', 'Optional non-negative decimal price'],
+        ['Barcode', 'No', 'EAN-13, UPC-A, or Code 128 code (format column as Text to keep leading zeros)'],
+        ['Category', 'No', 'Matches existing category name or creates a new category if enabled'],
+        ['Tax Category', 'No', 'standard, exempt, or zero (defaults to standard)'],
+        ['Minimum Stock', 'No', 'Non-negative whole number reorder threshold (defaults to 5)'],
+        ['Initial Stock', 'No', 'Opening quantity added to the selected active branch'],
+        ['Status', 'No', 'active or archived (defaults to active)'],
+      ]),
+    },
   ];
-  XLSX.utils.book_append_sheet(wb, productSheet, 'Products');
 
-  const instructionsSheet = XLSX.utils.aoa_to_sheet([
-    ['Field', 'Required', 'Accepted Values & Notes'],
-    ['Product Name', 'Yes', '1 to 180 characters'],
-    ['SKU', 'Yes', 'Unique code, auto-uppercased, max 64 characters'],
-    ['Selling Price', 'Yes', 'Non-negative decimal number in organization currency'],
-    ['Cost Price', 'No', 'Non-negative decimal number (defaults to 0.00)'],
-    ['Wholesale Price', 'No', 'Optional non-negative decimal price'],
-    ['Barcode', 'No', 'EAN-13, UPC-A, or Code 128 code (format column as Text to keep leading zeros)'],
-    ['Category', 'No', 'Matches existing category name or creates a new category if enabled'],
-    ['Tax Category', 'No', 'standard, exempt, or zero (defaults to standard)'],
-    ['Minimum Stock', 'No', 'Non-negative whole number reorder threshold (defaults to 5)'],
-    ['Initial Stock', 'No', 'Opening quantity added to the selected active branch'],
-    ['Status', 'No', 'active or archived (defaults to active)'],
-  ]);
-  instructionsSheet['!cols'] = [{ wch: 18 }, { wch: 10 }, { wch: 68 }];
-  XLSX.utils.book_append_sheet(wb, instructionsSheet, 'Instructions');
-
-  XLSX.writeFile(wb, 'product_import_template.xlsx');
+  await writeXlsxFile(sheets).toFile('product_import_template.xlsx');
 }

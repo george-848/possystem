@@ -1,4 +1,5 @@
 import { setGmailAccessToken } from './firebase';
+import { sanitizeHttpUrl } from './url';
 
 function escapeHtml(input: string): string {
   return input
@@ -50,6 +51,10 @@ export async function sendInvitationViaGmail(
   params: SendGmailInvitationParams
 ): Promise<{ messageId: string }> {
   const cleanRecipient = params.recipientEmail.replace(/[\r\n]+/g, '').trim();
+  const safeInviteUrl = sanitizeHttpUrl(params.inviteUrl);
+  if (!safeInviteUrl) {
+    throw new Error('Invalid invitation link URL.');
+  }
   const orgName = params.organizationName.trim() || 'Multi-Branch POS System';
   const subject = `Staff Invitation: Join ${orgName} on Multi-Branch POS System`;
 
@@ -63,7 +68,7 @@ export async function sendInvitationViaGmail(
         <strong>Branch Access:</strong> ${escapeHtml(params.branchSummary)}
       </p>
       <p style="margin:24px 0;">
-        <a href="${escapeHtml(params.inviteUrl)}" style="background:#059669;color:#ffffff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">
+        <a href="${escapeHtml(safeInviteUrl)}" style="background:#059669;color:#ffffff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">
           Accept Staff Invitation
         </a>
       </p>

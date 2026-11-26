@@ -231,6 +231,20 @@ export const DEFAULT_PLAN_MAP = new Map<string, SubscriptionPlan>(
   DEFAULT_SAAS_PLANS.map((p) => [p.planId, p])
 );
 
+export function mergePlansWithDefaults(
+  firestorePlans: SubscriptionPlan[]
+): SubscriptionPlan[] {
+  const byId = new Map<string, SubscriptionPlan>(
+    DEFAULT_SAAS_PLANS.map((p) => [p.planId, p])
+  );
+  for (const plan of firestorePlans) {
+    if (plan?.planId) {
+      byId.set(plan.planId, plan);
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => a.sortOrder - b.sortOrder);
+}
+
 export function getPlanById(
   planId: string | undefined,
   plans?: SubscriptionPlan[]
@@ -250,6 +264,44 @@ export function getPlanPriceMinor(
   billingCycle: BillingCycle
 ): number {
   return billingCycle === 'annual' ? plan.annualPriceMinor : plan.monthlyPriceMinor;
+}
+
+export interface IncrementalPlanFeatures {
+  includedFromPlanName: string | null;
+  additionalFeatures: FeatureDefinition[];
+}
+
+export function getIncrementalPlanFeatures(
+  plan: SubscriptionPlan,
+  allPlans: SubscriptionPlan[]
+): IncrementalPlanFeatures {
+  const ordered = [...allPlans]
+    .filter((p) => p.status !== 'archived')
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+
+  const idx = ordered.findIndex((p) => p.planId === plan.planId);
+  const prevPlan = idx > 0 ? ordered[idx - 1] : null;
+
+  if (prevPlan) {
+    const prevFeatures = FEATURE_CATALOG.filter((f) => Boolean(prevPlan.features?.[f.key]));
+    const includesAllPrev =
+      prevFeatures.length > 0 &&
+      prevFeatures.every((f) => Boolean(plan.features?.[f.key]));
+
+    if (includesAllPrev) {
+      return {
+        includedFromPlanName: prevPlan.name,
+        additionalFeatures: FEATURE_CATALOG.filter(
+          (f) => Boolean(plan.features?.[f.key]) && !prevPlan.features?.[f.key]
+        ),
+      };
+    }
+  }
+
+  return {
+    includedFromPlanName: null,
+    additionalFeatures: FEATURE_CATALOG.filter((f) => Boolean(plan.features?.[f.key])),
+  };
 }
 
 export interface QuotaEvaluation {

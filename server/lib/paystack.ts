@@ -88,6 +88,16 @@ export async function initializePaystackTransaction(params: {
     throw new Error(payload.message || `Paystack initialization failed (${res.status}).`);
   }
 
+  let parsedAuthUrl: URL;
+  try {
+    parsedAuthUrl = new URL(payload.data.authorization_url);
+  } catch {
+    throw new Error('Paystack returned an invalid authorization URL.');
+  }
+  if (parsedAuthUrl.protocol !== 'https:') {
+    throw new Error('Paystack authorization URL must use HTTPS.');
+  }
+
   return payload.data;
 }
 
